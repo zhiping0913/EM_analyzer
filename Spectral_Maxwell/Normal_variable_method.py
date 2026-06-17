@@ -21,10 +21,17 @@ def _detect_gpu_count():
     return 0
 
 
-_n_gpus = _detect_gpu_count()
-USE_GPU = _n_gpus >= 2
-
+import os
 import jax
+
+# Honor an existing CPU pin set by the caller before this module was imported
+# (either via JAX_PLATFORMS=cpu env var or a prior jax.config.update).
+_user_forced_cpu = (
+    os.environ.get('JAX_PLATFORMS', '').lower() == 'cpu'
+    or getattr(jax.config, 'jax_platform_name', None) == 'cpu'
+)
+USE_GPU = (not _user_forced_cpu) and _detect_gpu_count() >= 2
+
 if USE_GPU:
     jax.config.update("jax_enable_x64", True)
     jax.config.update('jax_platform_name', 'gpu')
