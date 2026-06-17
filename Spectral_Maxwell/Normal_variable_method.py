@@ -28,7 +28,7 @@ import jax
 # (either via JAX_PLATFORMS=cpu env var or a prior jax.config.update).
 _user_forced_cpu = (
     os.environ.get('JAX_PLATFORMS', '').lower() == 'cpu'
-    or getattr(jax.config, 'jax_platform_name', None) == 'cpu'
+    or jax.config.values.get('jax_platform_name') == 'cpu'
 )
 USE_GPU = (not _user_forced_cpu) and _detect_gpu_count() >= 2
 
