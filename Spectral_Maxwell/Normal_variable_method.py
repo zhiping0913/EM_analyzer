@@ -1,15 +1,39 @@
 from functools import partial
 import sys
+import subprocess
 sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336')
 from typing import Optional
 from line_profiler import profile
 import numpy as np
+
+
+def _detect_gpu_count():
+    """Count NVIDIA GPUs via `nvidia-smi` without initializing JAX."""
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--list-gpus'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return sum(1 for line in result.stdout.strip().split('\n') if line.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return 0
+
+
+_n_gpus = _detect_gpu_count()
+USE_GPU = _n_gpus >= 2
+
 import jax
-jax.config.update('jax_num_cpu_devices', 6)
-jax.config.update("jax_enable_x64", True)
-jax.config.update('jax_platform_name', 'cpu')
-print(jax.local_device_count(),flush=True)
-print(jax.devices(),flush=True)
+if USE_GPU:
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update('jax_platform_name', 'gpu')
+else:
+    jax.config.update('jax_num_cpu_devices', 6)
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update('jax_platform_name', 'cpu')
+print(f"Backend: {'GPU' if USE_GPU else 'CPU'}, local device count: {jax.local_device_count()}", flush=True)
+print(jax.devices(), flush=True)
 from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
 from jax import jit
 import jax.numpy as jnp
@@ -20,13 +44,18 @@ from EM_analyzer.Spectral_Maxwell.kgrid import grid_k
 from EM_analyzer.spectrum import get_spectrum_from_field_with_coordinate,get_field_from_spectrum_with_coordinate
 
 
-devices = jax.local_devices()[:6]
-
-# 2-D mesh: 'EM' axis (size 2, E vs B*c) × 'channel' axis (size 3, x/y/z component)
-device_array = np.array(devices).reshape(2, 3)
-mesh = Mesh(device_array, ('EM', 'channel'))
-sharding_EM = NamedSharding(mesh, P('EM', 'channel'))   # (2, 3, Nx_pad, Ny_pad, Nz_pad)
-sharding_k  = NamedSharding(mesh, P('channel'))          # (3, Nx_pad, Ny_pad, Nz_pad)
+if USE_GPU:
+    # 2 GPUs: 1-D mesh on 'EM' axis (size 2, E vs B*c). Channel axis (size 3) is replicated.
+    devices = jax.local_devices()[:2]
+    mesh = Mesh(np.array(devices).reshape(2,), ('EM',))
+    sharding_EM = NamedSharding(mesh, P('EM', None))   # (2, 3, Nx_pad, Ny_pad, Nz_pad): shard axis 0
+    sharding_k  = NamedSharding(mesh, P())             # (3, Nx_pad, Ny_pad, Nz_pad): fully replicated
+else:
+    # 6 CPUs: 2-D mesh, 'EM' axis (size 2, E vs B*c) × 'channel' axis (size 3, x/y/z component).
+    devices = jax.local_devices()[:6]
+    mesh = Mesh(np.array(devices).reshape(2, 3), ('EM', 'channel'))
+    sharding_EM = NamedSharding(mesh, P('EM', 'channel'))   # (2, 3, Nx_pad, Ny_pad, Nz_pad)
+    sharding_k  = NamedSharding(mesh, P('channel'))         # (3, Nx_pad, Ny_pad, Nz_pad)
 
 @profile
 @partial(jit)
