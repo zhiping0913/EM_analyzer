@@ -13,7 +13,7 @@ import jax.numpy as jnp
 from typing import List, Optional, Tuple, Union
 import scipy.constants as C
 import string
-
+from jax_array_info import sharding_info
 def print_array_size(a:np.ndarray,name=''):
     print(f'array {name}, shape={a.shape}, dtype={a.dtype}, size={a.size}, itemsize={a.itemsize}b, nbytes={a.nbytes/C.gibi}GB')
 
@@ -776,7 +776,6 @@ def pad_for_fft(
     field: jnp.ndarray,
     axis: Union[int, Tuple[int, ...]],
     coordinate_each_axis: List[jnp.ndarray],
-    out_sharding=None,
 ) -> Tuple[jnp.ndarray, List[jnp.ndarray], Tuple[slice, ...]]:
     """
     Pad a field for FFT computation.
@@ -797,9 +796,6 @@ def pad_for_fft(
     coordinate_each_axis : List[jnp.ndarray]
         Coordinate array for each axis in `axis`.  Must have the same length
         as `axis`; each coordinate array must match the corresponding axis size.
-    out_sharding : optional
-        If provided, the padded field is moved to this sharding via `jax.device_put`.
-
     Returns
     -------
     field_pad : jnp.ndarray
@@ -859,10 +855,6 @@ def pad_for_fft(
     pad_slices = tuple(
         slice(pad_befores[i], pad_befores[i] + field.shape[ax]) for i, ax in enumerate(axis)
     )
-
-    if out_sharding is not None:
-        field_pad = jax.device_put(field_pad, out_sharding)
-
     return field_pad, coordinate_pad_list, pad_slices
 
 #@jax.jit

@@ -150,6 +150,7 @@ class Spectral_Maxwell_Solver:
         self, 
         E0: jnp.ndarray, B0: jnp.ndarray, 
         x_coordinate=[0],y_coordinate=[0],z_coordinate=[0],
+        pad=True,
         ):
         """
         Parameters
@@ -190,6 +191,7 @@ class Spectral_Maxwell_Solver:
             axis=[2,3,4],
             r_coordinate_each_axis=[self.x_coordinate, self.y_coordinate, self.z_coordinate],
             out_sharding=sharding_EM,
+            pad=pad,
         )
         sharding_info(spectrum, "Initial spectrum from field")
         self.EMk0 = spectrum   #shape=(2, 3, Nx_pad, Ny_pad, Nz_pad): EMk0[0]=Ek0, EMk0[1]=Bk0*c
@@ -296,6 +298,7 @@ class Spectral_Maxwell_Solver_1D():
         E0x:Optional[jnp.ndarray]=None, E0y:Optional[jnp.ndarray]=None, E0z:Optional[jnp.ndarray]=None,
         B0x:Optional[jnp.ndarray]=None, B0y:Optional[jnp.ndarray]=None, B0z:Optional[jnp.ndarray]=None,
         x_coordinate=[0],
+        pad=True,
         ):
         self.x_coordinate = jnp.asarray(x_coordinate,dtype=jnp.float64).flatten()
         self.Nx=self.x_coordinate.size
@@ -309,6 +312,7 @@ class Spectral_Maxwell_Solver_1D():
         self.Solver=Spectral_Maxwell_Solver(
             E0=E0, B0=B0, 
             x_coordinate=x_coordinate, y_coordinate=[0], z_coordinate=[0],
+            pad=pad,
             )
     def evolution(self, evolution_time=0.0,window_shift_velocity=0.0):
         """_summary_
@@ -346,6 +350,7 @@ class Spectral_Maxwell_Solver_2D():
         E0x:Optional[jnp.ndarray]=None, E0y:Optional[jnp.ndarray]=None, E0z:Optional[jnp.ndarray]=None,
         B0x:Optional[jnp.ndarray]=None, B0y:Optional[jnp.ndarray]=None, B0z:Optional[jnp.ndarray]=None,    
         x_coordinate=[0], y_coordinate=[0],
+        pad=True,
         ):
         self.x_coordinate = jnp.asarray(x_coordinate,dtype=jnp.float64).flatten()
         self.y_coordinate = jnp.asarray(y_coordinate,dtype=jnp.float64).flatten()
@@ -360,6 +365,7 @@ class Spectral_Maxwell_Solver_2D():
         self.Solver=Spectral_Maxwell_Solver(
             E0=E0, B0=B0, 
             x_coordinate=x_coordinate, y_coordinate=y_coordinate, z_coordinate=[0],
+            pad=pad,
             )
     def evolution(self, evolution_time=0.0,window_shift_velocity=(0.0,0.0)):
         """_summary_
