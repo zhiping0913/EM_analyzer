@@ -45,15 +45,27 @@ def cleanup_file(path):
 
 
 
-def read_dat(dat_name='',shape=()):
+def read_dat(dat_name='',shape=(),use_shm=True):
+    if use_shm:
+        dat_name=copy_to_dev_shm(dat_name)
     print('Read %s' %(dat_name))
     print(shape)
     data=np.fromfile(dat_name,dtype=np.float64)
     data=data.reshape(np.flip(shape))
     data=data.transpose()
+    if use_shm:
+        cleanup_file(dat_name)
     return data
 
-
+def write_dat(data,dat_name=''):
+    print('Write %s' %(dat_name))
+    data=np.array(data,dtype=np.float64)
+    print(data.shape)
+    data=data.transpose()
+    data=data.flatten()
+    data.tofile(dat_name)
+    print(dat_name)
+    return dat_name
 
 
 def write_fields_to_nc(
