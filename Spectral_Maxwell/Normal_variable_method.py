@@ -36,10 +36,17 @@ if USE_GPU:
     jax.config.update("jax_enable_x64", True)
     jax.config.update('jax_platform_name', 'gpu')
 else:
-    jax.config.update('jax_num_cpu_devices', 6)
+    # Don't override JAX_NUM_CPU_DEVICES if the caller has already set it
+    # (e.g. multi-process slurm jobs use a smaller per-process count).
+    if not os.environ.get('JAX_NUM_CPU_DEVICES'):
+        jax.config.update('jax_num_cpu_devices', 6)
     jax.config.update("jax_enable_x64", True)
     jax.config.update('jax_platform_name', 'cpu')
-print(f"Backend: {'GPU' if USE_GPU else 'CPU'}, local device count: {jax.local_device_count()}", flush=True)
+print(
+    f"Backend: {'GPU' if USE_GPU else 'CPU'}, "
+    f"local devices: {jax.local_device_count()}, global devices: {jax.device_count()}",
+    flush=True,
+)
 print(jax.devices(), flush=True)
 from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
 from jax import jit
@@ -51,15 +58,20 @@ from EM_analyzer.Spectral_Maxwell.kgrid import grid_k
 from EM_analyzer.spectrum import get_spectrum_from_field_with_coordinate,get_field_from_spectrum_with_coordinate
 
 
+# Use jax.devices() (global view) so multi-process / multi-node distributed
+# runs see all devices across nodes, not just the local 3.
 if USE_GPU:
     # 2 GPUs: 1-D mesh on 'EM' axis (size 2, E vs B*c). Channel axis (size 3) is replicated.
-    devices = jax.local_devices()[:2]
+    devices = jax.devices()[:2]
     mesh = Mesh(np.array(devices).reshape(2,), ('EM',))
     sharding_EM = NamedSharding(mesh, P('EM', None))   # (2, 3, Nx_pad, Ny_pad, Nz_pad): shard axis 0
     sharding_k  = NamedSharding(mesh, P())             # (3, Nx_pad, Ny_pad, Nz_pad): fully replicated
 else:
-    # 6 CPUs: 2-D mesh, 'EM' axis (size 2, E vs B*c) × 'channel' axis (size 3, x/y/z component).
-    devices = jax.local_devices()[:6]
+    # 6 CPUs (1 node × 6 devices, or 2 nodes × 3 devices via jax.distributed):
+    # 2-D mesh, 'EM' axis (size 2, E vs B*c) × 'channel' axis (size 3, x/y/z component).
+    # When distributed across 2 nodes, jax.devices() orders by (process_id, local_id),
+    # so reshape(2, 3) puts node-0's 3 devices on EM=0 and node-1's 3 devices on EM=1.
+    devices = jax.devices()[:6]
     mesh = Mesh(np.array(devices).reshape(2, 3), ('EM', 'channel'))
     sharding_EM = NamedSharding(mesh, P('EM', 'channel'))   # (2, 3, Nx_pad, Ny_pad, Nz_pad)
     sharding_k  = NamedSharding(mesh, P('channel'))         # (3, Nx_pad, Ny_pad, Nz_pad)
