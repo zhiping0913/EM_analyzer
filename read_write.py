@@ -1,4 +1,3 @@
-import sdf_helper
 import os
 import shutil
 import numpy as np
@@ -182,6 +181,8 @@ def read_sdf(sdf_name='',block_name_list=[],Grid_name='Grid_mid',use_shm=True):
         pass
     print(f'Available keys: {list(data_dict.keys())}')
     return data_dict
+    """
+    import sdf_helper
     sdf=sdf_helper.getdata(fname=fname)
     
     data_dict={}
@@ -207,6 +208,8 @@ def read_sdf(sdf_name='',block_name_list=[],Grid_name='Grid_mid',use_shm=True):
     if use_shm:
         cleanup_file(fname)
     return data_dict
+    """
+
 
 if __name__ == "__main__":
     #read_nc(nc_name='/scratch/gpfs/MIKHAILOVA/zl8336/Small_a0/test/collision/EE_collision/cpl=5000,ppl=2000/fields0001.sdf',key_name_list=[])
