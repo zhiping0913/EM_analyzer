@@ -334,6 +334,32 @@ def get_energy_flux_from_field(
     Poynting_vector : jnp.ndarray
         Shape (3, ...), same trailing dims as the inputs.
     """
+    Electric_Field = jnp.asarray(Electric_Field)
+    Magnetic_Field = jnp.asarray(Magnetic_Field)
+    assert Electric_Field.shape[0] == 3, (
+        f"Electric_Field.shape[0] must be 3 (vector component), got {Electric_Field.shape[0]}"
+    )
+    assert Magnetic_Field.shape[0] == 3, (
+        f"Magnetic_Field.shape[0] must be 3 (vector component), got {Magnetic_Field.shape[0]}"
+    )
+    assert Electric_Field.shape == Magnetic_Field.shape, (
+        f"Electric_Field.shape {Electric_Field.shape} and Magnetic_Field.shape "
+        f"{Magnetic_Field.shape} must match."
+    )
+    ndim = Electric_Field.ndim
+    if axis is not None:
+        axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
+        if r_coordinate_each_axis is not None:
+            assert len(r_coordinate_each_axis) == len(axis), (
+                f"len(r_coordinate_each_axis)={len(r_coordinate_each_axis)} must "
+                f"match len(axis)={len(axis)}."
+            )
+            for i, ax in enumerate(axis):
+                assert jnp.asarray(r_coordinate_each_axis[i]).size == Electric_Field.shape[ax], (
+                    f"r_coordinate_each_axis[{i}].size="
+                    f"{jnp.asarray(r_coordinate_each_axis[i]).size} must match "
+                    f"field.shape[axis={ax}]={Electric_Field.shape[ax]}."
+                )
     E_spectrum, k_coordinate_each_axis, pad_slices = get_spectrum_from_field_with_coordinate(
         field=Electric_Field, axis=axis,
         r_coordinate_each_axis=r_coordinate_each_axis,
