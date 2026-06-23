@@ -299,4 +299,65 @@ def get_energy_flux_from_field_analytic(
     return Poynting_vector
 
 
+def get_energy_flux_from_field(
+    Electric_Field:jnp.ndarray,
+    Magnetic_Field:jnp.ndarray,
+    axis: Optional[Union[int, Tuple[int, ...]]]=None,
+    axis_hilbert: Optional[int]=0,
+    r_coordinate_each_axis: Optional[List[jnp.ndarray]]=None,
+    out_sharding=None,
+    ):
+    """
+    Compute the time-averaged energy flux (Poynting vector) directly from the
+    real-valued E and B fields. Internally builds the analytic signals via the
+    Hilbert transform in Fourier space along `axis_hilbert` and then calls
+    get_energy_flux_from_field_analytic.
+
+    Parameters
+    ----------
+    Electric_Field, Magnetic_Field : jnp.ndarray
+        Shape (3, ...): first dim is the vector component (x, y, z); remaining
+        dims are the spatial / temporal grid.
+    axis : int or tuple of ints
+        Axes along which to FFT/IFFT. Indexed against the input shape (so for
+        a (3, Nx) input the spatial axis is 1, not 0).
+    axis_hilbert : int
+        Which of the FFT'd axes carries the optical carrier (gets the analytic
+        signal filter). Indexed against the input shape.
+    r_coordinate_each_axis : list of jnp.ndarray, optional
+        Real-space coordinate arrays, one per axis in `axis`.
+    out_sharding : optional
+        Sharding to apply to the padded field inside the spectrum step.
+
+    Returns
+    -------
+    Poynting_vector : jnp.ndarray
+        Shape (3, ...), same trailing dims as the inputs.
+    """
+    E_spectrum, k_coordinate_each_axis, pad_slices = get_spectrum_from_field_with_coordinate(
+        field=Electric_Field, axis=axis,
+        r_coordinate_each_axis=r_coordinate_each_axis,
+        out_sharding=out_sharding,
+    )
+    B_spectrum, _, _ = get_spectrum_from_field_with_coordinate(
+        field=Magnetic_Field, axis=axis,
+        r_coordinate_each_axis=r_coordinate_each_axis,
+        out_sharding=out_sharding,
+    )
+    E_analytic_spectrum = get_analytic_spectrum_from_field_spectrum(E_spectrum, axis=axis_hilbert)
+    B_analytic_spectrum = get_analytic_spectrum_from_field_spectrum(B_spectrum, axis=axis_hilbert)
+    E_analytic = get_field_from_spectrum_with_coordinate(
+        spectrum=E_analytic_spectrum, axis=axis,
+        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices, real=False,
+    )
+    B_analytic = get_field_from_spectrum_with_coordinate(
+        spectrum=B_analytic_spectrum, axis=axis,
+        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices, real=False,
+    )
+    return get_energy_flux_from_field_analytic(
+        Electric_Field_analytic=E_analytic,
+        Magnetic_Field_analytic=B_analytic,
+    )
+
+
 
