@@ -18,6 +18,19 @@ def print_array_size(a:np.ndarray,name=''):
     print(f'array {name}, shape={a.shape}, dtype={a.dtype}, size={a.size}, itemsize={a.itemsize}b, nbytes={a.nbytes/C.gibi}GB')
 
 
+def print_shard_layout(arr, name=""):
+    """Print, on each process, which device every addressable shard of `arr`
+    lives on and which index slice it covers. Useful for diagnosing multi-host
+    sharding (each process only sees its own local shards)."""
+    pid = jax.process_index()
+    try:
+        shards = arr.addressable_shards
+    except AttributeError:
+        print(f"[{name}] process {pid}: array has no addressable_shards (not a jax.Array?)", flush=True)
+        return
+    print(f"[{name}] process {pid} sees {len(shards)} addressable shard(s):", flush=True)
+    for i, s in enumerate(shards):
+        print(f"  [{name}] shard {i}: device={s.device}  index={s.index}", flush=True)
 
 
 @jax.jit
