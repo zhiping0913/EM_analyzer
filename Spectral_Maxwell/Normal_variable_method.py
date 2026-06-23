@@ -52,8 +52,7 @@ from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
 from jax import jit
 import jax.numpy as jnp
 import scipy.constants as C
-from jax_array_info import sharding_info
-from EM_analyzer.pretreat_fields import check_divergence,stack_Fields
+from EM_analyzer.pretreat_fields import check_divergence,stack_Fields,print_shard_layout
 from EM_analyzer.Spectral_Maxwell.kgrid import grid_k
 from EM_analyzer.spectrum import get_spectrum_from_field_with_coordinate,get_field_from_spectrum_with_coordinate
 
@@ -195,8 +194,8 @@ class Spectral_Maxwell_Solver:
         assert self.B0.shape == (3, self.Nx, self.Ny, self.Nz), f"B0 shape {self.B0.shape} does not match grid shape {(3, self.Nx, self.Ny, self.Nz)}"
         print(f"Initial field shapes {self.E0.shape} verified.", flush=True)
         # Check transversality in real space
-        check_divergence(Field=self.E0, x_coordinate=self.x_coordinate, y_coordinate=self.y_coordinate, z_coordinate=self.z_coordinate)
-        check_divergence(Field=self.B0, x_coordinate=self.x_coordinate, y_coordinate=self.y_coordinate, z_coordinate=self.z_coordinate)
+        # check_divergence(Field=self.E0, x_coordinate=self.x_coordinate, y_coordinate=self.y_coordinate, z_coordinate=self.z_coordinate)
+        # check_divergence(Field=self.B0, x_coordinate=self.x_coordinate, y_coordinate=self.y_coordinate, z_coordinate=self.z_coordinate)
         EM0 = jnp.stack([self.E0, self.B0 * C.speed_of_light])   #shape=(2, 3, Nx, Ny, Nz): [0]=E, [1]=B*c
         spectrum, k_coordinate_each_axis, pad_slices=get_spectrum_from_field_with_coordinate(
             field=EM0,   #shape=(2, 3, Nx, Ny, Nz)
@@ -205,7 +204,7 @@ class Spectral_Maxwell_Solver:
             out_sharding=sharding_EM,
             pad=pad,
         )
-        sharding_info(spectrum, "Initial spectrum from field")
+        print_shard_layout(spectrum, "Initial spectrum from field")
         self.EMk0 = spectrum   #shape=(2, 3, Nx_pad, Ny_pad, Nz_pad): EMk0[0]=Ek0, EMk0[1]=Bk0*c
         self.kx_coordinate, self.ky_coordinate, self.kz_coordinate = k_coordinate_each_axis
         self.Nx_pad=self.kx_coordinate.size

@@ -17,7 +17,6 @@ from EM_analyzer.fft_backend import fftn,ifftn,fftfreq
 from EM_analyzer.pretreat_fields import pad_for_fft,get_norm,print_shard_layout
 from EM_analyzer.Spectral_Maxwell.kgrid import make_k_coordinate_from_r_coordinate,make_r_coordinate_from_k_coordinate
 from scipy.signal import hilbert
-from jax_array_info import sharding_info
 
 
 @partial(jax.jit, static_argnames=('axis'))
@@ -98,7 +97,6 @@ def get_spectrum_from_field_with_coordinate(
         pad_slices=tuple(slice(None) for _ in axis)
     if out_sharding is not None:
         field_pad = jax.device_put(field_pad, out_sharding)
-    sharding_info(field_pad, name="field_pad")
     print_shard_layout(field_pad, name="field_pad")
     k_coordinate_each_axis=[]
     dr_each_axis=[]
@@ -107,7 +105,6 @@ def get_spectrum_from_field_with_coordinate(
         k_coordinate_each_axis.append(k_coordinate)
         dr_each_axis.append(dr)
     spectrum=fftn(field_pad, axes=axis)*jnp.prod(jnp.array(dr_each_axis))
-    sharding_info(spectrum, name="spectrum")
     print_shard_layout(spectrum, name="spectrum")
     return spectrum, k_coordinate_each_axis, pad_slices
 

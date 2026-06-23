@@ -19,9 +19,11 @@ def print_array_size(a:np.ndarray,name=''):
 
 
 def print_shard_layout(arr, name=""):
-    """Print, on each process, which device every addressable shard of `arr`
-    lives on and which index slice it covers. Useful for diagnosing multi-host
-    sharding (each process only sees its own local shards)."""
+    """Print sharding_info (shape/dtype/named-sharding summary) plus, on each
+    process, which device every addressable shard of `arr` lives on and which
+    index slice it covers. Useful for diagnosing multi-host sharding (each
+    process only sees its own local shards)."""
+    sharding_info(arr, name=name)
     pid = jax.process_index()
     try:
         shards = arr.addressable_shards
