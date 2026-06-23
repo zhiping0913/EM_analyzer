@@ -158,7 +158,10 @@ def get_field_from_spectrum_with_coordinate(
         dk_list.append(dk)
         N_list.append(shape[axis_i])
     #dr*dk=2π/N
-    field_pad=jax.device_get(ifftn(spectrum, axes=axis)*jnp.prod(jnp.array(dk_list)/(2*jnp.pi))*jnp.prod(jnp.array(N_list)))
+    # Keep as jax.Array (do NOT call device_get): in multi-process / multi-node
+    # runs the array spans non-addressable devices, so materializing here would
+    # raise. The caller can do its own process_allgather if it needs numpy.
+    field_pad=ifftn(spectrum, axes=axis)*jnp.prod(jnp.array(dk_list)/(2*jnp.pi))*jnp.prod(jnp.array(N_list))
     if pad_slices is None:
         field=field_pad
     else:
@@ -168,7 +171,7 @@ def get_field_from_spectrum_with_coordinate(
             slice_list[ax]=pad_slices[i]
         field=field_pad[tuple(slice_list)]
     if real:
-        return np.real(field)
+        return jnp.real(field)
     else:
         return field
 def get_envelope_from_spectrum_with_coordinate(
