@@ -55,6 +55,21 @@ def get_analytic_spectrum_from_field_spectrum(
     axis=np.mod(np.asarray(axis,dtype=int).flatten()[0], ndim)
     return _get_analytic_spectrum_from_field_spectrum(spectrum=spectrum, axis=axis)
 
+def _print_shard_layout(arr, name=""):
+    """Print, on each process, which device every addressable shard of `arr`
+    lives on and which index slice it covers. Useful for diagnosing multi-host
+    sharding (each process only sees its own local shards)."""
+    pid = jax.process_index()
+    try:
+        shards = arr.addressable_shards
+    except AttributeError:
+        print(f"[{name}] process {pid}: array has no addressable_shards (not a jax.Array?)", flush=True)
+        return
+    print(f"[{name}] process {pid} sees {len(shards)} addressable shard(s):", flush=True)
+    for i, s in enumerate(shards):
+        print(f"  [{name}] shard {i}: device={s.device}  index={s.index}", flush=True)
+
+
 def get_spectrum_from_field_with_coordinate(
     field: jnp.ndarray,
     axis: Optional[Union[int, Tuple[int, ...]]]=None,
@@ -99,6 +114,7 @@ def get_spectrum_from_field_with_coordinate(
     if out_sharding is not None:
         field_pad = jax.device_put(field_pad, out_sharding)
     sharding_info(field_pad, name="field_pad")
+    _print_shard_layout(field_pad, name="field_pad")
     k_coordinate_each_axis=[]
     dr_each_axis=[]
     for coordinate_pad in coordinate_pad_list:
@@ -107,6 +123,7 @@ def get_spectrum_from_field_with_coordinate(
         dr_each_axis.append(dr)
     spectrum=fftn(field_pad, axes=axis)*jnp.prod(jnp.array(dr_each_axis))
     sharding_info(spectrum, name="spectrum")
+    _print_shard_layout(spectrum, name="spectrum")
     return spectrum, k_coordinate_each_axis, pad_slices
 
 def get_field_from_spectrum_with_coordinate(
