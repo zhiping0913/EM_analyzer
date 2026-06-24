@@ -173,21 +173,30 @@ def get_field_from_spectrum_with_coordinate(
         return jnp.real(field)
     else:
         return field
-def get_envelope_from_spectrum_with_coordinate(
+def get_field_analytic_from_spectrum_with_coordinate(
     spectrum: jnp.ndarray,
     axis: Optional[Union[int, Tuple[int, ...]]]=None,
     axis_hilbert: Optional[int]=0,
     k_coordinate_each_axis: Optional[List[jnp.ndarray]]=None,
     pad_slices: Optional[Tuple[slice, ...]]=None,
     ):
-    """_summary_
+    """
+    Compute the (complex) analytic signal in real space from a 0-centered
+    spectrum. Applies the analytic-spectrum filter (1 + sign(freq)) along
+    `axis_hilbert`, then inverse-FFTs along `axis` with `real=False`.
 
     Args:
-        spectrum (jnp.ndarray): _description_
-        axis (Optional[Union[int, Tuple[int, ...]]], optional): _description_. Defaults to None.
-        axis_hilbert (Optional[int], optional): _description_. Defaults to 0.
-        k_coordinate_each_axis (Optional[List[jnp.ndarray]], optional): _description_. Defaults to None.
-        pad_slices (Optional[Tuple[slice, ...]], optional): _description_. Defaults to None.
+        spectrum (jnp.ndarray): 0-centered spectrum in Fourier space.
+        axis (Optional[Union[int, Tuple[int, ...]]]): Axes to inverse-FFT.
+        axis_hilbert (Optional[int]): Axis carrying the carrier; analytic
+            filter is applied along this axis. Defaults to 0.
+        k_coordinate_each_axis (Optional[List[jnp.ndarray]]): Physical k-axes
+            for each axis in `axis`.
+        pad_slices (Optional[Tuple[slice, ...]]): Slices to strip the FFT
+            padding from the reconstructed field, one per axis in `axis`.
+
+    Returns:
+        jnp.ndarray: Complex analytic field with the original (unpadded) shape.
     """
     spectrum_analytic=get_analytic_spectrum_from_field_spectrum(spectrum=spectrum, axis=axis_hilbert)
     field_analytic=get_field_from_spectrum_with_coordinate(
@@ -196,6 +205,27 @@ def get_envelope_from_spectrum_with_coordinate(
         k_coordinate_each_axis=k_coordinate_each_axis,
         pad_slices=pad_slices,
         real=False,
+    )
+    return field_analytic
+
+
+def get_envelope_from_spectrum_with_coordinate(
+    spectrum: jnp.ndarray,
+    axis: Optional[Union[int, Tuple[int, ...]]]=None,
+    axis_hilbert: Optional[int]=0,
+    k_coordinate_each_axis: Optional[List[jnp.ndarray]]=None,
+    pad_slices: Optional[Tuple[slice, ...]]=None,
+    ):
+    """
+    Envelope (|·|) and instantaneous phase (angle) of the analytic signal
+    obtained from `spectrum` via get_field_analytic_from_spectrum_with_coordinate.
+    """
+    field_analytic = get_field_analytic_from_spectrum_with_coordinate(
+        spectrum=spectrum,
+        axis=axis,
+        axis_hilbert=axis_hilbert,
+        k_coordinate_each_axis=k_coordinate_each_axis,
+        pad_slices=pad_slices,
     )
     return jnp.abs(field_analytic), jnp.angle(field_analytic)
 
@@ -370,15 +400,13 @@ def get_energy_flux_from_field(
         r_coordinate_each_axis=r_coordinate_each_axis,
         out_sharding=out_sharding,
     )
-    E_analytic_spectrum = get_analytic_spectrum_from_field_spectrum(E_spectrum, axis=axis_hilbert)
-    B_analytic_spectrum = get_analytic_spectrum_from_field_spectrum(B_spectrum, axis=axis_hilbert)
-    E_analytic = get_field_from_spectrum_with_coordinate(
-        spectrum=E_analytic_spectrum, axis=axis,
-        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices, real=False,
+    E_analytic = get_field_analytic_from_spectrum_with_coordinate(
+        spectrum=E_spectrum, axis=axis, axis_hilbert=axis_hilbert,
+        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices,
     )
-    B_analytic = get_field_from_spectrum_with_coordinate(
-        spectrum=B_analytic_spectrum, axis=axis,
-        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices, real=False,
+    B_analytic = get_field_analytic_from_spectrum_with_coordinate(
+        spectrum=B_spectrum, axis=axis, axis_hilbert=axis_hilbert,
+        k_coordinate_each_axis=k_coordinate_each_axis, pad_slices=pad_slices,
     )
     return get_energy_flux_from_field_analytic(
         Electric_Field_analytic=E_analytic,
