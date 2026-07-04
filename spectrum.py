@@ -377,19 +377,27 @@ def get_energy_flux_from_field(
         f"{Magnetic_Field.shape} must match."
     )
     ndim = Electric_Field.ndim
-    if axis is not None:
+    if axis is None:
+        # Default: FFT over every non-component axis. Axis 0 is the (x, y, z)
+        # component axis and must NOT be included.
+        axis = tuple(range(1, ndim))
+    else:
         axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
-        if r_coordinate_each_axis is not None:
-            assert len(r_coordinate_each_axis) == len(axis), (
-                f"len(r_coordinate_each_axis)={len(r_coordinate_each_axis)} must "
-                f"match len(axis)={len(axis)}."
+    assert 0 not in axis, (
+        f"axis={axis} must not include 0: axis 0 is the vector-component axis "
+        f"(x, y, z) and does not participate in the FFT."
+    )
+    if r_coordinate_each_axis is not None:
+        assert len(r_coordinate_each_axis) == len(axis), (
+            f"len(r_coordinate_each_axis)={len(r_coordinate_each_axis)} must "
+            f"match len(axis)={len(axis)}."
+        )
+        for i, ax in enumerate(axis):
+            assert jnp.asarray(r_coordinate_each_axis[i]).size == Electric_Field.shape[ax], (
+                f"r_coordinate_each_axis[{i}].size="
+                f"{jnp.asarray(r_coordinate_each_axis[i]).size} must match "
+                f"field.shape[axis={ax}]={Electric_Field.shape[ax]}."
             )
-            for i, ax in enumerate(axis):
-                assert jnp.asarray(r_coordinate_each_axis[i]).size == Electric_Field.shape[ax], (
-                    f"r_coordinate_each_axis[{i}].size="
-                    f"{jnp.asarray(r_coordinate_each_axis[i]).size} must match "
-                    f"field.shape[axis={ax}]={Electric_Field.shape[ax]}."
-                )
     E_spectrum, k_coordinate_each_axis, pad_slices = get_spectrum_from_field_with_coordinate(
         field=Electric_Field, axis=axis,
         r_coordinate_each_axis=r_coordinate_each_axis,
