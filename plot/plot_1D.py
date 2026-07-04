@@ -87,7 +87,7 @@ def plot_multiple_1D_fields(
     if ymin is not None and ymax is not None:
         ax.set_ylim(ymin,ymax)
     if plot_legend:
-        ax.legend(fontsize=14)
+        ax.legend(fontsize=14, loc='upper left', bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)   #move legend outside of the plot
     if return_fig:
         ax_dict={
             'fig':fig,
