@@ -14,8 +14,49 @@ The polar convention:
 """
 
 from typing import Union
+import jax
 import jax.numpy as jnp
 from interpax import interp2d
+
+from EM_analyzer.pretreat_fields import square_integral_field
+
+
+def square_integral_polar(
+    field: jnp.ndarray,
+    rho_coordinate: jnp.ndarray,
+    theta_coordinate: jnp.ndarray,
+    rho_axis: int = -2,
+    theta_axis: int = -1,
+):
+    """
+    Compute ∬|F|² ρ dρ dθ, summing every axis of `field`.
+
+    Reuses `square_integral_field` after multiplying `field` pointwise by
+    √ρ (broadcast along `rho_axis`) — the resulting |·|² therefore picks up
+    the polar Jacobian |J| = ρ. The `dr` argument then supplies dρ·dθ.
+
+    Parameters
+    ----------
+    field : array_like
+        Any shape, with a ρ axis (length Nρ) and a θ axis (length Nθ).
+    rho_coordinate : (Nρ,) non-negative, ascending
+    theta_coordinate : (Nθ,) radians, ascending
+    rho_axis, theta_axis : int
+        Which axes of `field` are ρ and θ. Default is the last two.
+    """
+    field = jnp.asarray(field)
+    rho   = jnp.asarray(rho_coordinate).flatten()
+    theta = jnp.asarray(theta_coordinate).flatten()
+    drho   = float(rho[1]   - rho[0])   if rho.size   > 1 else 1.0
+    dtheta = float(theta[1] - theta[0]) if theta.size > 1 else 1.0
+
+    rho_axis = int(rho_axis) % field.ndim
+    shape_bcast = [1] * field.ndim
+    shape_bcast[rho_axis] = rho.size
+    rho_bcast = rho.reshape(shape_bcast)
+
+    field_weighted = field * jnp.sqrt(rho_bcast)
+    return square_integral_field(field_weighted, dr=[drho, dtheta], axis=None)
 
 
 def polar_transformation(
@@ -83,15 +124,36 @@ def polar_transformation(
     Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
 
     if direction == 'Cartesian->Polar':
-        return _cartesian_to_polar(
+        result = _cartesian_to_polar(
             field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
             Nx, Ny, Nrho, Ntheta, type, method, extrap,
         )
     else:
-        return _polar_to_cartesian(
+        result = _polar_to_cartesian(
             field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
             Nx, Ny, Nrho, Ntheta, type, method, extrap,
         )
+
+    # Ratio check: integrate the input and output over their native grids and
+    # print I1/I0. Faithful interpolation gives ≈ 1; NaN means the target grid
+    # extends past the source grid (queries land outside → `extrap=False`).
+    dx = float(x_coordinate[1] - x_coordinate[0]) if x_coordinate.size > 1 else 1.0
+    dy = float(y_coordinate[1] - y_coordinate[0]) if y_coordinate.size > 1 else 1.0
+    rho_axis, theta_axis = (0, 1) if type == 'scalar' else (1, 2)
+    if direction == 'Cartesian->Polar':
+        I0 = square_integral_field(field, dr=[dx, dy], axis=None)
+        I1 = square_integral_polar(
+            result, rho_coordinate, theta_coordinate,
+            rho_axis=rho_axis, theta_axis=theta_axis,
+        )
+    else:
+        I0 = square_integral_polar(
+            field, rho_coordinate, theta_coordinate,
+            rho_axis=rho_axis, theta_axis=theta_axis,
+        )
+        I1 = square_integral_field(result, dr=[dx, dy], axis=None)
+    jax.debug.print('polar_transformation Integral ratio I1/I0: {ratio}', ratio=I1 / I0)
+    return result
 
 
 def _cartesian_to_polar(
