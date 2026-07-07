@@ -95,6 +95,7 @@ def plot_multiple_1D_fields(
         }
         return ax_dict
     else:
+        plt.tight_layout()
         return savefig(fig,fig_path=os.path.join(working_dir,name+'.png'))
 
 def plot_twinx(
