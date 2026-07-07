@@ -800,7 +800,7 @@ def plot_quiver_field(
 
 
 
-def Plot_complex_field_2D(
+def plot_complex_field_2D(
     A:np.ndarray=None, 
     phase:np.ndarray=None,amplitude:np.ndarray=None,
     A_max=None,
