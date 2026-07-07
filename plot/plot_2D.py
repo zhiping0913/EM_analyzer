@@ -807,7 +807,9 @@ def plot_complex_field_2D(
     x_axis=None,y_axis=None,
     xlabel='x',ylabel='y',label='',
     xmin:Optional[float]=None,xmax:Optional[float]=None,ymin:Optional[float]=None,ymax:Optional[float]=None,
-    plot_polar_colorbar=False,working_dir='.'
+    plot_polar_colorbar=False,
+    return_fig=False,name='',
+    working_dir='.'
     ):
     """
     绘制二维复数场，并使用极坐标colorbar同时展示相位和振幅
@@ -856,9 +858,13 @@ def plot_complex_field_2D(
     ax_cbar.set_yticks(phase_ticks)
     ax_cbar.set_yticklabels(phase_tick_labels, fontsize=9)
     ax_cbar.set_ylabel('phase (rad)', fontsize=10)
-    savefig(fig=fig,fig_path=os.path.join(working_dir,f'Complex_field_{label}.png'))
     if plot_polar_colorbar:
         plot_polar_hsv_colorbar(label=label)
+    if return_fig:
+        return {'fig': fig, 'ax_main': ax_main}
+    else:
+        return savefig(fig=fig, fig_path=os.path.join(working_dir, f'{name}.png'))
+
     
 
 def plot_polar_hsv_colorbar(label=''):
