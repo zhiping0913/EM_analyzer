@@ -402,7 +402,7 @@ def check_divergence(Field:jnp.ndarray, x_coordinate=[0],y_coordinate=[0],z_coor
 
 @partial(jax.jit, static_argnames=('axis'))
 def square_sum(x,axis):
-    return jnp.real(jnp.sum(jnp.conj(x)*x,axis=axis))
+    return jnp.real(jnp.nansum(jnp.conj(x)*x,axis=axis))
 @profile
 def square_integral_field(Field:jnp.ndarray,dr=[1],axis= None):
     """
