@@ -9,8 +9,8 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Generated test outputs (heavy: ~68MB of PNG/h5/nc)
-Spectral_Maxwell/test/Propagation_2D_Gaussian/
+# All test notebooks, propagation experiments, and generated outputs
+/test/
 
 # Claude Code local settings
 .claude/
