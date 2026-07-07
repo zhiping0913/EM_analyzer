@@ -27,6 +27,7 @@ Spherical convention:
         e_φ = (-sin φ,        cos φ,        0   )
 """
 
+from functools import partial
 from typing import Union
 import jax
 import jax.numpy as jnp
@@ -140,12 +141,12 @@ def polar_transformation(
     if direction == 'Cartesian->Polar':
         result = _cartesian_to_polar(
             field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-            Nx, Ny, Nrho, Ntheta, type, method, extrap,
+            type, method, extrap,
         )
     else:
         result = _polar_to_cartesian(
             field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-            Nx, Ny, Nrho, Ntheta, type, method, extrap,
+            type, method, extrap,
         )
 
     # Ratio check: integrate the input and output over their native grids and
@@ -170,10 +171,13 @@ def polar_transformation(
     return result
 
 
+@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
 def _cartesian_to_polar(
     field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-    Nx, Ny, Nrho, Ntheta, type, method, extrap,
+    type, method, extrap,
 ):
+    Nx, Ny       = x_coordinate.size, y_coordinate.size
+    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
     # Query points on the Cartesian source grid, one per (ρ, θ) target cell:
     #   xq[i, j] = ρ[i] cos θ[j],   yq[i, j] = ρ[i] sin θ[j]
     rho_grid, theta_grid = jnp.meshgrid(rho_coordinate, theta_coordinate, indexing='ij')
@@ -224,10 +228,13 @@ def _cartesian_to_polar(
     return jnp.einsum('ijk,jrk...->irk...', R, result)                   # (2, Nρ, Nθ, ...)
 
 
+@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
 def _polar_to_cartesian(
     field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-    Nx, Ny, Nrho, Ntheta, type, method, extrap,
+    type, method, extrap,
 ):
+    Nx, Ny       = x_coordinate.size, y_coordinate.size
+    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
     # Query points on the polar source grid, one per (x, y) target cell:
     #   ρ_q  = √(x² + y²),   θ_q = atan2(y, x)  (wrapped into theta_coordinate's range)
     xg, yg = jnp.meshgrid(x_coordinate, y_coordinate, indexing='ij')
@@ -405,14 +412,12 @@ def spherical_transformation(
         result = _cartesian_to_spherical(
             field, x_coordinate, y_coordinate, z_coordinate,
             r_coordinate, theta_coordinate, phi_coordinate,
-            Nx, Ny, Nz, Nr, Ntheta, Nphi,
             type, method, extrap,
         )
     else:
         result = _spherical_to_cartesian(
             field, x_coordinate, y_coordinate, z_coordinate,
             r_coordinate, theta_coordinate, phi_coordinate,
-            Nx, Ny, Nz, Nr, Ntheta, Nphi,
             type, method, extrap,
         )
 
@@ -437,12 +442,14 @@ def spherical_transformation(
     return result
 
 
+@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
 def _cartesian_to_spherical(
     field, x_coordinate, y_coordinate, z_coordinate,
     r_coordinate, theta_coordinate, phi_coordinate,
-    Nx, Ny, Nz, Nr, Ntheta, Nphi,
     type, method, extrap,
 ):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
     # Query points on the Cartesian source grid, one per (r, θ, φ) target cell:
     #   xq = r sinθ cosφ,   yq = r sinθ sinφ,   zq = r cosθ
     r_grid, th_grid, ph_grid = jnp.meshgrid(
@@ -503,12 +510,14 @@ def _cartesian_to_spherical(
     return jnp.einsum('ijst,jrst...->irst...', R, result)                # (3, Nr, Nθ, Nφ, ...)
 
 
+@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
 def _spherical_to_cartesian(
     field, x_coordinate, y_coordinate, z_coordinate,
     r_coordinate, theta_coordinate, phi_coordinate,
-    Nx, Ny, Nz, Nr, Ntheta, Nphi,
     type, method, extrap,
 ):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
     # Query points on the spherical source grid, one per (x, y, z) target cell:
     #   r_q = √(x²+y²+z²),   θ_q = atan2(√(x²+y²), z) ∈ [0, π],
     #   φ_q = atan2(y, x)   ∈ [-π, π],  wrapped into phi_coordinate's range.
