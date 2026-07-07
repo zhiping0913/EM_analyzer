@@ -14,8 +14,6 @@ The polar convention:
 """
 
 from typing import Union
-import numpy as np
-import jax
 import jax.numpy as jnp
 from interpax import interp2d
 
@@ -137,17 +135,17 @@ def _cartesian_to_polar(
     result = jnp.moveaxis(result, -1, 0)                                 # (2, Nρ, Nθ, ...)
 
     # Vector rotation:
-    #   F_ρ =  Fx cos θ + Fy sin θ
-    #   F_θ = -Fx sin θ + Fy cos θ
-    cos_t = jnp.cos(theta_coordinate)[None, :]                           # (1, Nθ)
-    sin_t = jnp.sin(theta_coordinate)[None, :]
-    for _ in trailing:
-        cos_t = cos_t[..., None]
-        sin_t = sin_t[..., None]
-    Fx, Fy = result[0], result[1]
-    F_rho   =  Fx * cos_t + Fy * sin_t
-    F_theta = -Fx * sin_t + Fy * cos_t
-    return jnp.stack([F_rho, F_theta], axis=0)
+    #   [F_ρ]   [ cos θ   sin θ] [Fx]
+    #   [F_θ] = [-sin θ   cos θ] [Fy]
+    # R has axes (out_component, in_component, θ); result has axes
+    # (in_component, ρ, θ, ...).
+    cos_t = jnp.cos(theta_coordinate)
+    sin_t = jnp.sin(theta_coordinate)
+    R = jnp.stack([
+        jnp.stack([ cos_t, sin_t]),
+        jnp.stack([-sin_t, cos_t]),
+    ])                                                                   # (2, 2, Nθ)
+    return jnp.einsum('ijk,jrk...->irk...', R, result)                   # (2, Nρ, Nθ, ...)
 
 
 def _polar_to_cartesian(
@@ -197,15 +195,15 @@ def _polar_to_cartesian(
     result = jnp.moveaxis(result, -1, 0)                                 # (2, Nx, Ny, ...)
 
     # Vector rotation (inverse of the C→P rotation, evaluated at θ_q(x, y)):
-    #   Fx =  F_ρ cos θ_q - F_θ sin θ_q
-    #   Fy =  F_ρ sin θ_q + F_θ cos θ_q
+    #   [Fx]   [cos θ_q   -sin θ_q] [F_ρ]
+    #   [Fy] = [sin θ_q    cos θ_q] [F_θ]
+    # R has axes (out_component, in_component, x, y); result has axes
+    # (in_component, x, y, ...).
     theta_grid = jnp.arctan2(yg, xg)                                     # (Nx, Ny)
     cos_t = jnp.cos(theta_grid)
     sin_t = jnp.sin(theta_grid)
-    for _ in trailing:
-        cos_t = cos_t[..., None]
-        sin_t = sin_t[..., None]
-    F_rho, F_theta = result[0], result[1]
-    Fx = F_rho * cos_t - F_theta * sin_t
-    Fy = F_rho * sin_t + F_theta * cos_t
-    return jnp.stack([Fx, Fy], axis=0)
+    R = jnp.stack([
+        jnp.stack([cos_t, -sin_t]),
+        jnp.stack([sin_t,  cos_t]),
+    ])                                                                   # (2, 2, Nx, Ny)
+    return jnp.einsum('ijab,jab...->iab...', R, result)                  # (2, Nx, Ny, ...)
