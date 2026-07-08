@@ -157,3 +157,63 @@ def configure_jax_backend(
         'LOCAL_DEVICE_COUNT':  LOCAL_DEVICE_COUNT,
         'GLOBAL_DEVICE_COUNT': GLOBAL_DEVICE_COUNT,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sharding helpers
+#
+# The "channel" pattern shards a (n_components, ...) array across n_components
+# local devices. This is the same convention used by rotate_3D (3-component
+# vector fields) and by the vector-case fast paths of
+# coordinate_transformation (2- or 3-component vector fields).
+#
+# When we don't have enough local devices for a clean split (e.g. 3-way
+# sharding on 2 GPUs), we fall back to a single-device replicated mesh —
+# the code still runs correctly, just without the parallel speed-up.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_channel_sharding_cache: dict = {}
+
+
+def get_channel_sharding(n_components: int):
+    """
+    Return a `NamedSharding` that shards axis 0 of a `(n_components, …)`
+    array across `n_components` local devices.
+
+    Falls back to a 1-device, fully replicated mesh if there aren't enough
+    local devices. Cached per `n_components`.
+    """
+    if n_components in _channel_sharding_cache:
+        return _channel_sharding_cache[n_components]
+
+    if USE_GPU is None:
+        configure_jax_backend()
+
+    import jax
+    from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
+    import numpy as np
+
+    n_local = jax.local_device_count()
+    if n_local >= n_components:
+        devs  = jax.local_devices()[:n_components]
+        mesh  = Mesh(np.array(devs), ('channel',))
+        shard = NamedSharding(mesh, P('channel'))
+    else:
+        devs  = jax.local_devices()[:1]
+        mesh  = Mesh(np.array(devs), ('channel',))
+        shard = NamedSharding(mesh, P())           # fully replicated
+
+    _channel_sharding_cache[n_components] = shard
+    return shard
+
+
+def get_replicated_on_channel_mesh(n_components: int):
+    """
+    Return a `NamedSharding` that replicates over the *same* mesh as
+    `get_channel_sharding(n_components)`. Use this for small 1-D coordinate
+    arrays fed alongside a sharded (n_components, …) field — the coordinates
+    need to broadcast to every device that holds a shard of the field.
+    """
+    from jax.sharding import PartitionSpec as P, NamedSharding
+    ch = get_channel_sharding(n_components)
+    return NamedSharding(ch.mesh, P())

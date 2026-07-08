@@ -28,12 +28,25 @@ Spherical convention:
 """
 
 from functools import partial
-from typing import Union
+from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 from interpax import interp2d, interp3d
 
+from EM_analyzer.device_config import (
+    configure_jax_backend, get_channel_sharding, get_replicated_on_channel_mesh,
+)
 from EM_analyzer.pretreat_fields import square_integral_field
+
+# Make sure the backend is configured before we build any sharding spec.
+configure_jax_backend()
+
+# Vector-case shardings, built once at import time so they can go into the
+# `@partial(jax.jit, in_shardings=…, out_shardings=…)` decorators below.
+_ch_shard_2 = get_channel_sharding(2)                       # (2, …) fields
+_rep_on_2   = get_replicated_on_channel_mesh(2)             # small 1-D coords
+_ch_shard_3 = get_channel_sharding(3)                       # (3, …) fields
+_rep_on_3   = get_replicated_on_channel_mesh(3)             # small 1-D coords
 
 
 def square_integral_polar(
@@ -84,6 +97,7 @@ def polar_transformation(
     type: str = 'scalar',
     method: str = 'cubic',
     extrap: Union[bool, float] = False,
+    out_sharding: Optional[jax.sharding.NamedSharding] = None,
 ):
     """
     Resample a field between the Cartesian (x, y) grid and the polar (ρ, θ) grid.
@@ -138,16 +152,36 @@ def polar_transformation(
     Nx, Ny       = x_coordinate.size, y_coordinate.size
     Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
 
+    # Dispatch to the scalar / vector helper. The vector helpers are decorated
+    # with `in_shardings=` / `out_shardings=` so the component axis (Fx/Fy or
+    # F_ρ/F_θ) is sharded across the channel mesh whenever the local device
+    # count supports it.
     if direction == 'Cartesian->Polar':
-        result = _cartesian_to_polar(
-            field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-            type, method, extrap,
-        )
+        if type == 'scalar':
+            result = _cartesian_to_polar_scalar(
+                field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+                method, extrap,
+            )
+        else:
+            result = _cartesian_to_polar_vector(
+                field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+                method, extrap,
+            )
     else:
-        result = _polar_to_cartesian(
-            field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-            type, method, extrap,
-        )
+        if type == 'scalar':
+            result = _polar_to_cartesian_scalar(
+                field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+                method, extrap,
+            )
+        else:
+            result = _polar_to_cartesian_vector(
+                field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+                method, extrap,
+            )
+
+    # Caller-supplied out_sharding overrides the built-in vector-case sharding.
+    if out_sharding is not None:
+        result = jax.device_put(result, out_sharding)
 
     # Ratio check: integrate the input and output over their native grids and
     # print I1/I0. Faithful interpolation gives ≈ 1; NaN means the target grid
@@ -171,38 +205,49 @@ def polar_transformation(
     return result
 
 
-@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
-def _cartesian_to_polar(
+@partial(jax.jit, static_argnames=('method', 'extrap'))
+def _cartesian_to_polar_scalar(
     field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-    type, method, extrap,
+    method, extrap,
 ):
     Nx, Ny       = x_coordinate.size, y_coordinate.size
     Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
-    # Query points on the Cartesian source grid, one per (ρ, θ) target cell:
-    #   xq[i, j] = ρ[i] cos θ[j],   yq[i, j] = ρ[i] sin θ[j]
+    assert field.shape[:2] == (Nx, Ny), (
+        f"scalar Cartesian->Polar: field.shape[:2]={field.shape[:2]} must equal (Nx,Ny)=({Nx},{Ny})"
+    )
     rho_grid, theta_grid = jnp.meshgrid(rho_coordinate, theta_coordinate, indexing='ij')
     xq = (rho_grid * jnp.cos(theta_grid)).flatten()
     yq = (rho_grid * jnp.sin(theta_grid)).flatten()
+    result_flat = interp2d(
+        xq=xq, yq=yq,
+        x=x_coordinate, y=y_coordinate, f=field,
+        method=method, extrap=extrap,
+    )
+    trailing = field.shape[2:]
+    return result_flat.reshape((Nrho, Ntheta) + trailing)
 
-    if type == 'scalar':
-        assert field.shape[:2] == (Nx, Ny), (
-            f"scalar Cartesian->Polar: field.shape[:2]={field.shape[:2]} must equal (Nx,Ny)=({Nx},{Ny})"
-        )
-        result_flat = interp2d(
-            xq=xq, yq=yq,
-            x=x_coordinate, y=y_coordinate, f=field,
-            method=method, extrap=extrap,
-        )
-        trailing = field.shape[2:]
-        return result_flat.reshape((Nrho, Ntheta) + trailing)
 
-    # vector
+@partial(
+    jax.jit,
+    static_argnames=('method', 'extrap'),
+    in_shardings=(_ch_shard_2, _rep_on_2, _rep_on_2, _rep_on_2, _rep_on_2),
+    out_shardings=_ch_shard_2,
+)
+def _cartesian_to_polar_vector(
+    field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+    method, extrap,
+):
+    Nx, Ny       = x_coordinate.size, y_coordinate.size
+    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
     assert field.shape[0] == 2, (
         f"vector: field.shape[0] must be 2 (Fx, Fy), got {field.shape[0]}"
     )
     assert field.shape[1:3] == (Nx, Ny), (
         f"vector Cartesian->Polar: field.shape[1:3]={field.shape[1:3]} must equal (Nx,Ny)=({Nx},{Ny})"
     )
+    rho_grid, theta_grid = jnp.meshgrid(rho_coordinate, theta_coordinate, indexing='ij')
+    xq = (rho_grid * jnp.cos(theta_grid)).flatten()
+    yq = (rho_grid * jnp.sin(theta_grid)).flatten()
     # interp2d expects `f` shape (Nx, Ny, ...): move component axis to the end.
     f_moved = jnp.moveaxis(field, 0, -1)                                 # (Nx, Ny, ..., 2)
     result_flat = interp2d(
@@ -228,45 +273,61 @@ def _cartesian_to_polar(
     return jnp.einsum('ijk,jrk...->irk...', R, result)                   # (2, Nρ, Nθ, ...)
 
 
-@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
-def _polar_to_cartesian(
-    field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
-    type, method, extrap,
-):
-    Nx, Ny       = x_coordinate.size, y_coordinate.size
-    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
-    # Query points on the polar source grid, one per (x, y) target cell:
-    #   ρ_q  = √(x² + y²),   θ_q = atan2(y, x)  (wrapped into theta_coordinate's range)
+def _polar_to_cartesian_query_points(x_coordinate, y_coordinate, theta_coordinate):
+    """Compute polar-source query points from a Cartesian target grid."""
     xg, yg = jnp.meshgrid(x_coordinate, y_coordinate, indexing='ij')
     rho_q_flat   = jnp.sqrt(xg**2 + yg**2).flatten()
     theta_q_raw  = jnp.arctan2(yg, xg).flatten()
-    # Bring atan2's [-π, π) output into [θ_start, θ_start + 2π). interp2d's
-    # `period` argument handles the periodic wrap on the interpolation side,
-    # but pre-shifting to the coordinate's own range gives nicer diagnostics.
     theta_start  = theta_coordinate[0]
     theta_q_flat = jnp.mod(theta_q_raw - theta_start, 2 * jnp.pi) + theta_start
-    # For interp2d(x=ρ, y=θ, f=...), period is (period_x, period_y) → periodic in θ only.
+    return xg, yg, rho_q_flat, theta_q_flat
+
+
+@partial(jax.jit, static_argnames=('method', 'extrap'))
+def _polar_to_cartesian_scalar(
+    field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+    method, extrap,
+):
+    Nx, Ny       = x_coordinate.size, y_coordinate.size
+    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
+    assert field.shape[:2] == (Nrho, Ntheta), (
+        f"scalar Polar->Cartesian: field.shape[:2]={field.shape[:2]} must equal (Nρ,Nθ)=({Nrho},{Ntheta})"
+    )
+    _, _, rho_q_flat, theta_q_flat = _polar_to_cartesian_query_points(
+        x_coordinate, y_coordinate, theta_coordinate,
+    )
     period = (None, float(2 * jnp.pi))
+    result_flat = interp2d(
+        xq=rho_q_flat, yq=theta_q_flat,
+        x=rho_coordinate, y=theta_coordinate, f=field,
+        method=method, extrap=extrap, period=period,
+    )
+    trailing = field.shape[2:]
+    return result_flat.reshape((Nx, Ny) + trailing)
 
-    if type == 'scalar':
-        assert field.shape[:2] == (Nrho, Ntheta), (
-            f"scalar Polar->Cartesian: field.shape[:2]={field.shape[:2]} must equal (Nρ,Nθ)=({Nrho},{Ntheta})"
-        )
-        result_flat = interp2d(
-            xq=rho_q_flat, yq=theta_q_flat,
-            x=rho_coordinate, y=theta_coordinate, f=field,
-            method=method, extrap=extrap, period=period,
-        )
-        trailing = field.shape[2:]
-        return result_flat.reshape((Nx, Ny) + trailing)
 
-    # vector
+@partial(
+    jax.jit,
+    static_argnames=('method', 'extrap'),
+    in_shardings=(_ch_shard_2, _rep_on_2, _rep_on_2, _rep_on_2, _rep_on_2),
+    out_shardings=_ch_shard_2,
+)
+def _polar_to_cartesian_vector(
+    field, x_coordinate, y_coordinate, rho_coordinate, theta_coordinate,
+    method, extrap,
+):
+    Nx, Ny       = x_coordinate.size, y_coordinate.size
+    Nrho, Ntheta = rho_coordinate.size, theta_coordinate.size
     assert field.shape[0] == 2, (
         f"vector: field.shape[0] must be 2 (F_ρ, F_θ), got {field.shape[0]}"
     )
     assert field.shape[1:3] == (Nrho, Ntheta), (
         f"vector Polar->Cartesian: field.shape[1:3]={field.shape[1:3]} must equal (Nρ,Nθ)=({Nrho},{Ntheta})"
     )
+    xg, yg, rho_q_flat, theta_q_flat = _polar_to_cartesian_query_points(
+        x_coordinate, y_coordinate, theta_coordinate,
+    )
+    period = (None, float(2 * jnp.pi))
     f_moved = jnp.moveaxis(field, 0, -1)                                 # (Nρ, Nθ, ..., 2)
     result_flat = interp2d(
         xq=rho_q_flat, yq=theta_q_flat,
@@ -280,8 +341,6 @@ def _polar_to_cartesian(
     # Vector rotation (inverse of the C→P rotation, evaluated at θ_q(x, y)):
     #   [Fx]   [cos θ_q   -sin θ_q] [F_ρ]
     #   [Fy] = [sin θ_q    cos θ_q] [F_θ]
-    # R has axes (out_component, in_component, x, y); result has axes
-    # (in_component, x, y, ...).
     theta_grid = jnp.arctan2(yg, xg)                                     # (Nx, Ny)
     cos_t = jnp.cos(theta_grid)
     sin_t = jnp.sin(theta_grid)
@@ -360,6 +419,7 @@ def spherical_transformation(
     type: str = 'scalar',
     method: str = 'cubic',
     extrap: Union[bool, float] = False,
+    out_sharding: Optional[jax.sharding.NamedSharding] = None,
 ):
     """
     Resample a field between the Cartesian (x, y, z) grid and the spherical
@@ -409,17 +469,34 @@ def spherical_transformation(
     Nr, Ntheta, Nphi        = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
 
     if direction == 'Cartesian->Spherical':
-        result = _cartesian_to_spherical(
-            field, x_coordinate, y_coordinate, z_coordinate,
-            r_coordinate, theta_coordinate, phi_coordinate,
-            type, method, extrap,
-        )
+        if type == 'scalar':
+            result = _cartesian_to_spherical_scalar(
+                field, x_coordinate, y_coordinate, z_coordinate,
+                r_coordinate, theta_coordinate, phi_coordinate,
+                method, extrap,
+            )
+        else:
+            result = _cartesian_to_spherical_vector(
+                field, x_coordinate, y_coordinate, z_coordinate,
+                r_coordinate, theta_coordinate, phi_coordinate,
+                method, extrap,
+            )
     else:
-        result = _spherical_to_cartesian(
-            field, x_coordinate, y_coordinate, z_coordinate,
-            r_coordinate, theta_coordinate, phi_coordinate,
-            type, method, extrap,
-        )
+        if type == 'scalar':
+            result = _spherical_to_cartesian_scalar(
+                field, x_coordinate, y_coordinate, z_coordinate,
+                r_coordinate, theta_coordinate, phi_coordinate,
+                method, extrap,
+            )
+        else:
+            result = _spherical_to_cartesian_vector(
+                field, x_coordinate, y_coordinate, z_coordinate,
+                r_coordinate, theta_coordinate, phi_coordinate,
+                method, extrap,
+            )
+
+    if out_sharding is not None:
+        result = jax.device_put(result, out_sharding)
 
     # Ratio check: integrate the input and output over their native grids.
     dx = float(x_coordinate[1] - x_coordinate[0]) if x_coordinate.size > 1 else 1.0
@@ -442,16 +519,8 @@ def spherical_transformation(
     return result
 
 
-@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
-def _cartesian_to_spherical(
-    field, x_coordinate, y_coordinate, z_coordinate,
-    r_coordinate, theta_coordinate, phi_coordinate,
-    type, method, extrap,
-):
-    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
-    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
-    # Query points on the Cartesian source grid, one per (r, θ, φ) target cell:
-    #   xq = r sinθ cosφ,   yq = r sinθ sinφ,   zq = r cosθ
+def _cartesian_to_spherical_query_points(r_coordinate, theta_coordinate, phi_coordinate):
+    """Build Cartesian query points for the (r, θ, φ) target grid."""
     r_grid, th_grid, ph_grid = jnp.meshgrid(
         r_coordinate, theta_coordinate, phi_coordinate, indexing='ij',
     )
@@ -459,27 +528,55 @@ def _cartesian_to_spherical(
     xq = (r_grid * sin_th * jnp.cos(ph_grid)).flatten()
     yq = (r_grid * sin_th * jnp.sin(ph_grid)).flatten()
     zq = (r_grid * jnp.cos(th_grid)).flatten()
+    return xq, yq, zq
 
-    if type == 'scalar':
-        assert field.shape[:3] == (Nx, Ny, Nz), (
-            f"scalar Cartesian->Spherical: field.shape[:3]={field.shape[:3]} "
-            f"must equal (Nx, Ny, Nz)=({Nx}, {Ny}, {Nz})"
-        )
-        result_flat = interp3d(
-            xq=xq, yq=yq, zq=zq,
-            x=x_coordinate, y=y_coordinate, z=z_coordinate, f=field,
-            method=method, extrap=extrap,
-        )
-        trailing = field.shape[3:]
-        return result_flat.reshape((Nr, Ntheta, Nphi) + trailing)
 
-    # vector
+@partial(jax.jit, static_argnames=('method', 'extrap'))
+def _cartesian_to_spherical_scalar(
+    field, x_coordinate, y_coordinate, z_coordinate,
+    r_coordinate, theta_coordinate, phi_coordinate,
+    method, extrap,
+):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
+    assert field.shape[:3] == (Nx, Ny, Nz), (
+        f"scalar Cartesian->Spherical: field.shape[:3]={field.shape[:3]} "
+        f"must equal (Nx, Ny, Nz)=({Nx}, {Ny}, {Nz})"
+    )
+    xq, yq, zq = _cartesian_to_spherical_query_points(
+        r_coordinate, theta_coordinate, phi_coordinate,
+    )
+    result_flat = interp3d(
+        xq=xq, yq=yq, zq=zq,
+        x=x_coordinate, y=y_coordinate, z=z_coordinate, f=field,
+        method=method, extrap=extrap,
+    )
+    trailing = field.shape[3:]
+    return result_flat.reshape((Nr, Ntheta, Nphi) + trailing)
+
+
+@partial(
+    jax.jit,
+    static_argnames=('method', 'extrap'),
+    in_shardings=(_ch_shard_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3),
+    out_shardings=_ch_shard_3,
+)
+def _cartesian_to_spherical_vector(
+    field, x_coordinate, y_coordinate, z_coordinate,
+    r_coordinate, theta_coordinate, phi_coordinate,
+    method, extrap,
+):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
     assert field.shape[0] == 3, (
         f"vector: field.shape[0] must be 3 (Fx, Fy, Fz), got {field.shape[0]}"
     )
     assert field.shape[1:4] == (Nx, Ny, Nz), (
         f"vector Cartesian->Spherical: field.shape[1:4]={field.shape[1:4]} "
         f"must equal (Nx, Ny, Nz)=({Nx}, {Ny}, {Nz})"
+    )
+    xq, yq, zq = _cartesian_to_spherical_query_points(
+        r_coordinate, theta_coordinate, phi_coordinate,
     )
     f_moved = jnp.moveaxis(field, 0, -1)                                 # (Nx, Ny, Nz, ..., 3)
     result_flat = interp3d(
@@ -492,10 +589,6 @@ def _cartesian_to_spherical(
     result = jnp.moveaxis(result, -1, 0)                                 # (3, Nr, Nθ, Nφ, ...)
 
     # Vector rotation (Cartesian → Spherical), evaluated at target (θ, φ):
-    #   [F_r]     [ sinθ cosφ,  sinθ sinφ,   cosθ] [Fx]
-    #   [F_θ]  =  [ cosθ cosφ,  cosθ sinφ,  -sinθ] [Fy]
-    #   [F_φ]     [-sinφ,       cosφ,        0   ] [Fz]
-    # sin/cos of θ and φ only depend on (θ, φ) — cache them at the target grid.
     tg, pg   = jnp.meshgrid(theta_coordinate, phi_coordinate, indexing='ij')
     sin_th_g = jnp.sin(tg);  cos_th_g = jnp.cos(tg)
     sin_ph_g = jnp.sin(pg);  cos_ph_g = jnp.cos(pg)
@@ -505,45 +598,60 @@ def _cartesian_to_spherical(
         jnp.stack([ cos_th_g * cos_ph_g,  cos_th_g * sin_ph_g,  -sin_th_g]),
         jnp.stack([-sin_ph_g,             cos_ph_g,              zero    ]),
     ])                                                                   # (3, 3, Nθ, Nφ)
-    # result: (3, Nr, Nθ, Nφ, ...);  einsum contracts j (input component),
-    # broadcasts (θ, φ) via matching labels s, t; keeps r free (only in result).
     return jnp.einsum('ijst,jrst...->irst...', R, result)                # (3, Nr, Nθ, Nφ, ...)
 
 
-@partial(jax.jit, static_argnames=('type', 'method', 'extrap'))
-def _spherical_to_cartesian(
-    field, x_coordinate, y_coordinate, z_coordinate,
-    r_coordinate, theta_coordinate, phi_coordinate,
-    type, method, extrap,
+def _spherical_to_cartesian_query_points(
+    x_coordinate, y_coordinate, z_coordinate, phi_coordinate,
 ):
-    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
-    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
-    # Query points on the spherical source grid, one per (x, y, z) target cell:
-    #   r_q = √(x²+y²+z²),   θ_q = atan2(√(x²+y²), z) ∈ [0, π],
-    #   φ_q = atan2(y, x)   ∈ [-π, π],  wrapped into phi_coordinate's range.
+    """Build spherical query points for the (x, y, z) target grid."""
     xg, yg, zg = jnp.meshgrid(x_coordinate, y_coordinate, z_coordinate, indexing='ij')
     r_q_flat  = jnp.sqrt(xg**2 + yg**2 + zg**2).flatten()
     th_q_flat = jnp.arctan2(jnp.sqrt(xg**2 + yg**2), zg).flatten()
     ph_q_raw  = jnp.arctan2(yg, xg).flatten()
     phi_start = phi_coordinate[0]
     ph_q_flat = jnp.mod(ph_q_raw - phi_start, 2 * jnp.pi) + phi_start
-    # interp3d(x=r, y=θ, z=φ) → periodic only in φ.
+    return xg, yg, zg, r_q_flat, th_q_flat, ph_q_flat
+
+
+@partial(jax.jit, static_argnames=('method', 'extrap'))
+def _spherical_to_cartesian_scalar(
+    field, x_coordinate, y_coordinate, z_coordinate,
+    r_coordinate, theta_coordinate, phi_coordinate,
+    method, extrap,
+):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
+    assert field.shape[:3] == (Nr, Ntheta, Nphi), (
+        f"scalar Spherical->Cartesian: field.shape[:3]={field.shape[:3]} "
+        f"must equal (Nr, Nθ, Nφ)=({Nr}, {Ntheta}, {Nphi})"
+    )
+    _, _, _, r_q_flat, th_q_flat, ph_q_flat = _spherical_to_cartesian_query_points(
+        x_coordinate, y_coordinate, z_coordinate, phi_coordinate,
+    )
     period = (None, None, float(2 * jnp.pi))
+    result_flat = interp3d(
+        xq=r_q_flat, yq=th_q_flat, zq=ph_q_flat,
+        x=r_coordinate, y=theta_coordinate, z=phi_coordinate, f=field,
+        method=method, extrap=extrap, period=period,
+    )
+    trailing = field.shape[3:]
+    return result_flat.reshape((Nx, Ny, Nz) + trailing)
 
-    if type == 'scalar':
-        assert field.shape[:3] == (Nr, Ntheta, Nphi), (
-            f"scalar Spherical->Cartesian: field.shape[:3]={field.shape[:3]} "
-            f"must equal (Nr, Nθ, Nφ)=({Nr}, {Ntheta}, {Nphi})"
-        )
-        result_flat = interp3d(
-            xq=r_q_flat, yq=th_q_flat, zq=ph_q_flat,
-            x=r_coordinate, y=theta_coordinate, z=phi_coordinate, f=field,
-            method=method, extrap=extrap, period=period,
-        )
-        trailing = field.shape[3:]
-        return result_flat.reshape((Nx, Ny, Nz) + trailing)
 
-    # vector
+@partial(
+    jax.jit,
+    static_argnames=('method', 'extrap'),
+    in_shardings=(_ch_shard_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3, _rep_on_3),
+    out_shardings=_ch_shard_3,
+)
+def _spherical_to_cartesian_vector(
+    field, x_coordinate, y_coordinate, z_coordinate,
+    r_coordinate, theta_coordinate, phi_coordinate,
+    method, extrap,
+):
+    Nx, Ny, Nz       = x_coordinate.size, y_coordinate.size, z_coordinate.size
+    Nr, Ntheta, Nphi = r_coordinate.size, theta_coordinate.size, phi_coordinate.size
     assert field.shape[0] == 3, (
         f"vector: field.shape[0] must be 3 (F_r, F_θ, F_φ), got {field.shape[0]}"
     )
@@ -551,6 +659,10 @@ def _spherical_to_cartesian(
         f"vector Spherical->Cartesian: field.shape[1:4]={field.shape[1:4]} "
         f"must equal (Nr, Nθ, Nφ)=({Nr}, {Ntheta}, {Nphi})"
     )
+    xg, yg, zg, r_q_flat, th_q_flat, ph_q_flat = _spherical_to_cartesian_query_points(
+        x_coordinate, y_coordinate, z_coordinate, phi_coordinate,
+    )
+    period = (None, None, float(2 * jnp.pi))
     f_moved = jnp.moveaxis(field, 0, -1)                                 # (Nr, Nθ, Nφ, ..., 3)
     result_flat = interp3d(
         xq=r_q_flat, yq=th_q_flat, zq=ph_q_flat,

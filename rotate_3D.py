@@ -1,36 +1,26 @@
 import sys
-from line_profiler import profile
+sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336')
 sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336/EM_analyzer')
-
-from EM_analyzer.device_config import configure_jax_backend
-_backend_info = configure_jax_backend()
+from line_profiler import profile
+from EM_analyzer.device_config import configure_jax_backend, get_channel_sharding
+configure_jax_backend()                 # side-effect: pin backend + device count
 
 import jax
-from jax.sharding import PartitionSpec, NamedSharding, Mesh
 import jax.numpy as jnp
-import numpy as np
 from typing import Optional, Tuple, Union
 from jax.scipy.ndimage import map_coordinates
 from Spectral_Maxwell.kgrid import make_k_coordinate_from_r_coordinate
 from EM_analyzer.pretreat_fields import square_integral_field
 from EM_analyzer.fft_backend import fftn, ifftn
 
-# Fields are shape (3, Nx, Ny, Nz) — first axis has 3 components (x, y, z).
-# Sharding strategy on the 'channel' axis:
-#   - If we have exactly 3 devices → one component per device (ideal).
-#   - Otherwise fall back to a 1-device replicated mesh: the code still runs
-#     correctly, just without the 3-way parallel speedup. This keeps
-#     rotate_3D compatible with the 2-GPU or 6-CPU backends chosen by
-#     device_config (6 CPUs — first 3 used here; 2 GPUs — replicated, since
-#     3 doesn't cleanly divide 2).
-_channel_devices = jax.local_devices()[:3] if _backend_info['LOCAL_DEVICE_COUNT'] >= 3 else jax.local_devices()[:1]
-mesh = Mesh(np.array(_channel_devices), ('channel',))
-if len(_channel_devices) == 3:
-    sharding = NamedSharding(mesh, PartitionSpec('channel', None, None, None))
-else:
-    # Not enough devices for a clean 3-way split → replicate.
-    sharding = NamedSharding(mesh, PartitionSpec(None, None, None, None))
-print(f"[rotate_3D] channel sharding uses {len(_channel_devices)} device(s)", flush=True)
+# Channel sharding for (3, Nx, Ny, Nz) fields — shared through
+# device_config so rotate_3D and coordinate_transformation don't build
+# competing meshes on the same physical devices. Falls back to a
+# 1-device replicated mesh when the backend can't do a clean 3-way split
+# (e.g. 2-GPU node).
+sharding = get_channel_sharding(3)
+mesh     = sharding.mesh
+
 @jax.jit
 def generate_rotation_matrix(phi, psi, theta):
     cph, sph = jnp.cos(phi), jnp.sin(phi)
