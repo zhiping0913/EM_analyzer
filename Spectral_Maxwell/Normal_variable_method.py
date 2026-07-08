@@ -287,30 +287,54 @@ class Spectral_Maxwell_Solver_1D():
             x_coordinate=x_coordinate, y_coordinate=[0], z_coordinate=[0],
             pad=pad,
             )
-    def evolution(self, evolution_time=0.0,window_shift_velocity=0.0):
-        """_summary_
-
-        Args:
-            evolution_time (float, optional): _description_. Defaults to 0.0.
-            window_shift_velocity: vx. Defaults to 0.0.
-
-        Returns:
-            _type_: _description_
+    def evolution(self, evolution_time=0.0, window_shift_velocity=0.0, return_spectrum=False):
         """
-        window_shift_velocity=jnp.pad(jnp.array(window_shift_velocity,dtype=jnp.float64).flatten(), pad_width=((0, 2),))   #shape=(3,)
-        EB_evolution_dict=self.Solver.evolution(
-            evolution_time=evolution_time,window_shift_velocity=window_shift_velocity
-            )
-        E_evolution_in_window=EB_evolution_dict["E"][:, :, 0, 0]   #shape=(3, Nx)
-        B_evolution_in_window=EB_evolution_dict["B"][:, :, 0, 0]   #shape=(3, Nx)
-        window_x_coordinate=EB_evolution_dict["x_coordinate"]   #shape=(Nx,)
+        Args
+        ----
+        evolution_time : float, s
+        window_shift_velocity : float, m/s (vx only for the 1-D solver)
+        return_spectrum : bool
+            False → return real fields (default, existing behavior).
+            True  → skip the IFFT and return the k-space spectrum together
+                    with `kx_coordinate` and `pad_slices` so the caller can
+                    plug the result straight into e.g.
+                    `spectrum.get_envelope_from_spectrum_with_coordinate` or
+                    `spectrum.get_field_from_spectrum_with_coordinate`.
+        """
+        window_shift_velocity_3d = jnp.pad(
+            jnp.array(window_shift_velocity, dtype=jnp.float64).flatten(),
+            pad_width=((0, 2),),
+        )   # shape=(3,)
+        result = self.Solver.evolution(
+            evolution_time=evolution_time,
+            window_shift_velocity=window_shift_velocity_3d,
+            return_spectrum=return_spectrum,
+        )
+        if return_spectrum:
+            Ek = result['Ek']   # (3, Nx_pad, 1, 1)
+            Bk = result['Bk']   # (3, Nx_pad, 1, 1)
+            window_x_coordinate = self.x_coordinate + window_shift_velocity_3d[0] * evolution_time
+            return {
+                'Ex_spectrum':   Ek[0, :, 0, 0],   # (Nx_pad,)
+                'Ey_spectrum':   Ek[1, :, 0, 0],
+                'Ez_spectrum':   Ek[2, :, 0, 0],
+                'Bx_spectrum':   Bk[0, :, 0, 0],
+                'By_spectrum':   Bk[1, :, 0, 0],
+                'Bz_spectrum':   Bk[2, :, 0, 0],
+                'kx_coordinate': result['kx_coordinate'],
+                'pad_slices':    result['pad_slices'][:1],   # drop y, z pad-slices
+                'x_coordinate':  window_x_coordinate,
+            }
+        E_evolution_in_window = result["E"][:, :, 0, 0]   # (3, Nx)
+        B_evolution_in_window = result["B"][:, :, 0, 0]
+        window_x_coordinate   = result["x_coordinate"]    # (Nx,)
         return {
-            'Ex': E_evolution_in_window[0,:],
-            'Ey': E_evolution_in_window[1,:],
-            'Ez': E_evolution_in_window[2,:],
-            'Bx': B_evolution_in_window[0,:],
-            'By': B_evolution_in_window[1,:],
-            'Bz': B_evolution_in_window[2,:],
+            'Ex': E_evolution_in_window[0, :],
+            'Ey': E_evolution_in_window[1, :],
+            'Ez': E_evolution_in_window[2, :],
+            'Bx': B_evolution_in_window[0, :],
+            'By': B_evolution_in_window[1, :],
+            'Bz': B_evolution_in_window[2, :],
             'x_coordinate': window_x_coordinate,
         }
 
@@ -340,31 +364,58 @@ class Spectral_Maxwell_Solver_2D():
             x_coordinate=x_coordinate, y_coordinate=y_coordinate, z_coordinate=[0],
             pad=pad,
             )
-    def evolution(self, evolution_time=0.0,window_shift_velocity=(0.0,0.0)):
-        """_summary_
-
-        Args:
-            evolution_time (float, optional): _description_. Defaults to 0.0.
-            window_shift_velocity: (vx,vy). Defaults to (0.0,0.0).
-
-        Returns:
-            _type_: _description_
+    def evolution(self, evolution_time=0.0, window_shift_velocity=(0.0, 0.0), return_spectrum=False):
         """
-        window_shift_velocity=jnp.pad(jnp.array(window_shift_velocity,dtype=jnp.float64).flatten(), pad_width=((0, 1),))   #shape=(3,)
-        EB_evolution_dict=self.Solver.evolution(
-            evolution_time=evolution_time,window_shift_velocity=window_shift_velocity
-            )
-        E_evolution_in_window=EB_evolution_dict["E"][:, :, :, 0]   #shape=(3, Nx, Ny)
-        B_evolution_in_window=EB_evolution_dict["B"][:, :, :, 0]   #shape=(3, Nx, Ny)
-        window_x_coordinate=EB_evolution_dict["x_coordinate"]   #shape=(Nx,)
-        window_y_coordinate=EB_evolution_dict["y_coordinate"]   #shape=(Ny,)
+        Args
+        ----
+        evolution_time : float, s
+        window_shift_velocity : tuple (vx, vy), m/s
+        return_spectrum : bool
+            False → return real fields (default).
+            True  → skip the IFFT and return (Ex_spectrum, Ey_spectrum, …,
+                    kx_coordinate, ky_coordinate, pad_slices) so the caller
+                    can plug the result straight into
+                    `spectrum.get_envelope_from_spectrum_with_coordinate` or
+                    `spectrum.get_field_from_spectrum_with_coordinate`.
+        """
+        window_shift_velocity_3d = jnp.pad(
+            jnp.array(window_shift_velocity, dtype=jnp.float64).flatten(),
+            pad_width=((0, 1),),
+        )   # shape=(3,)
+        result = self.Solver.evolution(
+            evolution_time=evolution_time,
+            window_shift_velocity=window_shift_velocity_3d,
+            return_spectrum=return_spectrum,
+        )
+        if return_spectrum:
+            Ek = result['Ek']   # (3, Nx_pad, Ny_pad, 1)
+            Bk = result['Bk']   # (3, Nx_pad, Ny_pad, 1)
+            window_x_coordinate = self.x_coordinate + window_shift_velocity_3d[0] * evolution_time
+            window_y_coordinate = self.y_coordinate + window_shift_velocity_3d[1] * evolution_time
+            return {
+                'Ex_spectrum':   Ek[0, :, :, 0],   # (Nx_pad, Ny_pad)
+                'Ey_spectrum':   Ek[1, :, :, 0],
+                'Ez_spectrum':   Ek[2, :, :, 0],
+                'Bx_spectrum':   Bk[0, :, :, 0],
+                'By_spectrum':   Bk[1, :, :, 0],
+                'Bz_spectrum':   Bk[2, :, :, 0],
+                'kx_coordinate': result['kx_coordinate'],
+                'ky_coordinate': result['ky_coordinate'],
+                'pad_slices':    result['pad_slices'][:2],   # drop z pad-slice
+                'x_coordinate':  window_x_coordinate,
+                'y_coordinate':  window_y_coordinate,
+            }
+        E_evolution_in_window = result["E"][:, :, :, 0]   # (3, Nx, Ny)
+        B_evolution_in_window = result["B"][:, :, :, 0]
+        window_x_coordinate   = result["x_coordinate"]    # (Nx,)
+        window_y_coordinate   = result["y_coordinate"]    # (Ny,)
         return {
-            'Ex': E_evolution_in_window[0,:,:],
-            'Ey': E_evolution_in_window[1,:,:],
-            'Ez': E_evolution_in_window[2,:,:],
-            'Bx': B_evolution_in_window[0,:,:],
-            'By': B_evolution_in_window[1,:,:],
-            'Bz': B_evolution_in_window[2,:,:],
+            'Ex': E_evolution_in_window[0, :, :],
+            'Ey': E_evolution_in_window[1, :, :],
+            'Ez': E_evolution_in_window[2, :, :],
+            'Bx': B_evolution_in_window[0, :, :],
+            'By': B_evolution_in_window[1, :, :],
+            'Bz': B_evolution_in_window[2, :, :],
             'x_coordinate': window_x_coordinate,
             'y_coordinate': window_y_coordinate,
         }
