@@ -135,7 +135,13 @@ class Gaussian_Beam_2D:
         optical_path = z + (x**2*kappa_z[jnp.newaxis,jnp.newaxis,:])/2  # shape: (Nx,1, Nz)
         return optical_path
     @profile
-    def get_pulse(self, FWHM_time: float,time_shift: float = 0.0, theta=0.0) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def get_pulse(
+        self, 
+        FWHM_time: float,
+        time_shift: float = 0.0, 
+        theta: float = 0.0,
+        working_dir: Optional[str] = None
+        ):
         """
         The pulse is obtained by: 
         1.Compute the beam propagation in z direction without temporal envelope by using angular spectrum method. The z is in the range [-3*FWHM_time*c, 3*FWHM_time*c].
@@ -185,23 +191,24 @@ class Gaussian_Beam_2D:
             }
             x_coordinate_rotated=self.x_coordinate
             z_coordinate_rotated=z_coordinate
-        #return EB_evolution_dict
-        # save the fields to NetCDF files
-        self.write_fields(E_field=EB_evolution_dict['E'], B_field=EB_evolution_dict['B'], x_coordinate=EB_evolution_dict['x_coordinate'],z_coordinate=EB_evolution_dict['z_coordinate'], name="Field_t=%+05.01fT0"%(time_shift/self.period),working_dir=working_dir)
-        # save the parameters to a text file
-        with open(os.path.join(working_dir,'Initialize_Field.txt'),'a') as f:
-            f.write(f'Gaussian Beam 2D parameters:\n')
-            f.write(f'wavelength= {self.wavelength} m\n')
-            f.write(f'w0/λ0= {self.w0/self.wavelength} \n')
-            f.write(f'FWHM_time= {FWHM_time} s\n')
-            f.write(f'Incidence angle theta= {theta} rad\n')
-            f.write(f'a0= {self.a0}\n')
-            f.write(f'λ0/dx= {self.wavelength/self.dx}\n')
-            f.write(f'x_min/λ0= {z_coordinate_rotated[0]/self.wavelength}\n')
-            f.write(f'x_max/λ0= {z_coordinate_rotated[-1]/self.wavelength}\n')
-            f.write(f'y_min/λ0= {x_coordinate_rotated[0]/self.wavelength}\n')
-            f.write(f'y_max/λ0= {x_coordinate_rotated[-1]/self.wavelength}\n')
-            f.write(f'\n')
+        if working_dir is not None:
+            os.makedirs(working_dir, exist_ok=True)
+            # save the fields to NetCDF files
+            self.write_fields(E_field=EB_evolution_dict['E'], B_field=EB_evolution_dict['B'], x_coordinate=EB_evolution_dict['x_coordinate'],z_coordinate=EB_evolution_dict['z_coordinate'], name="Field_t=%+05.01fT0"%(time_shift/self.period),working_dir=working_dir)
+            # save the parameters to a text file
+            with open(os.path.join(working_dir,'Initialize_Field.txt'),'a') as f:
+                f.write(f'Gaussian Beam 2D parameters:\n')
+                f.write(f'wavelength= {self.wavelength} m\n')
+                f.write(f'w0/λ0= {self.w0/self.wavelength} \n')
+                f.write(f'FWHM_time= {FWHM_time} s\n')
+                f.write(f'Incidence angle theta= {theta} rad\n')
+                f.write(f'a0= {self.a0}\n')
+                f.write(f'λ0/dx= {self.wavelength/self.dx}\n')
+                f.write(f'x_min/λ0= {z_coordinate_rotated[0]/self.wavelength}\n')
+                f.write(f'x_max/λ0= {z_coordinate_rotated[-1]/self.wavelength}\n')
+                f.write(f'y_min/λ0= {x_coordinate_rotated[0]/self.wavelength}\n')
+                f.write(f'y_max/λ0= {x_coordinate_rotated[-1]/self.wavelength}\n')
+                f.write(f'\n')
         return EB_evolution_dict
 
     def write_fields(self, E_field, B_field, x_coordinate,z_coordinate, name="Gaussian_Beam_2D",working_dir="."):
@@ -230,37 +237,3 @@ class Gaussian_Beam_2D:
             nc_name=f"{name}.nc",working_dir=working_dir,
         )
         return name
-
-working_dir="/scratch/gpfs/MIKHAILOVA/zl8336/Gaussian_beam_pulse/20cpl"
-
-
-
-if __name__ == "__main__":
-    laser_lambda = 0.8*C.micron		# Laser wavelength, unit:m
-    laser_f0=1/laser_lambda   #unit: m^-1
-    laser_k0=2*C.pi*laser_f0
-    laser_omega0=(2*C.pi*C.speed_of_light)/(laser_lambda)
-    laser_period=laser_lambda/C.speed_of_light
-    laser_Bc=(C.m_e*laser_omega0)/(C.elementary_charge)   #unit: T. 1.338718e+04T for 800nm laser
-    laser_Ec=laser_Bc*C.speed_of_light   #unit: V/m. 4.013376e+12V/m for 800nm laser
-    laser_a0 = 50		# Laser field strength
-    laser_amp=laser_a0*laser_Ec   #unit: V/m
-    laser_FWHM=8*C.femto   #The full width at half maximum of the intensity.
-    laser_tau=laser_FWHM/jnp.sqrt(2*jnp.log(2)) 
-    laser_w0_lambda= 5
-    laser_zR_lambda=C.pi*laser_w0_lambda**2
-    laser_w0=laser_w0_lambda*laser_lambda
-    laser_zR=laser_zR_lambda*laser_lambda
-    gaussian_beam = Gaussian_Beam_2D(
-        wavelength=laser_lambda,
-        w0_lambda=laser_w0_lambda,
-        phi_pol=0.0,
-        phi_cep=0.0,
-        a0=laser_a0,
-        r_resolution=20,
-        k_resolution=40,
-    )
-    gaussian_beam.get_pulse(FWHM_time=laser_FWHM,time_shift=-max(2.5*laser_w0/C.speed_of_light,2*laser_FWHM), theta=jnp.radians(45))
-
-
-

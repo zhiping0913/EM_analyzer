@@ -15,6 +15,7 @@ def _detect_gpu_count():
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
+            print(f"Detected {len(result.stdout.strip().splitlines())} NVIDIA GPUs via nvidia-smi.", flush=True)
             return sum(1 for line in result.stdout.strip().split('\n') if line.strip())
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
