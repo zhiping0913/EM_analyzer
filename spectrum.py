@@ -16,6 +16,7 @@ import xarray as xr
 from EM_analyzer.fft_backend import fftn,ifftn,fftfreq
 from EM_analyzer.pretreat_fields import pad_for_fft,get_norm,print_shard_layout
 from EM_analyzer.Spectral_Maxwell.kgrid import make_k_coordinate_from_r_coordinate,make_r_coordinate_from_k_coordinate
+from EM_analyzer.coordinate_transformation import polar_transformation
 from scipy.signal import hilbert
 
 
@@ -423,3 +424,140 @@ def get_energy_flux_from_field(
 
 
 
+
+
+def get_2D_polar_spectrum_from_2D_cartesian_spectrum(
+    spectrum: jnp.ndarray,
+    k_x_coordinate: jnp.ndarray,
+    k_y_coordinate: jnp.ndarray,
+    k_rho_coordinate: jnp.ndarray,
+    k_theta_coordinate: jnp.ndarray,
+):
+    """
+    Resample a 2-D Cartesian k-space spectrum onto a (k_ρ, k_θ) polar grid
+    and integrate to obtain both the radial spectrum I(k_ρ) and the angular
+    spectrum I(k_θ).
+
+    Uses EM_analyzer's angular Fourier convention (Parseval carries a
+    1/(2π) factor per k-dimension). Each 1-D projection absorbs one 1/(2π),
+    so I_of_kr matches the old frequency-convention I(f_r) at the same
+    physical mode and the closed-form peak constants (e.g.
+    `laser_spectrum_on_x_peak`) continue to normalise it.
+
+    Parameters
+    ----------
+    spectrum : (Nkx, Nky)
+        Complex or real 2-D k-space spectrum. Only |·|² enters the integrals.
+    k_x_coordinate, k_y_coordinate : 1-D ascending (rad/m).
+    k_rho_coordinate  : (Nρ,) non-negative ascending, target radial grid.
+    k_theta_coordinate: (Nθ,) radians. Range [-π/2, π/2] covers only the
+        k_x ≥ 0 half-plane (Hermitian symmetry means the other half is a
+        mirror image — no double-count correction is then needed).
+
+    Returns
+    -------
+    dict with keys
+        spectrum_intensity_polar : (Nρ, Nθ)  |·|² resampled onto polar grid
+        I_of_kr                  : (Nρ,)    ∫ |·|² · k_ρ · dk_θ / (2π)
+        I_of_ktheta              : (Nθ,)    ∫ |·|² · k_ρ · dk_ρ / (2π)
+
+    Notes
+    -----
+    I_of_ktheta uses the same single-1/(2π) convention as I_of_kr, for a
+    consistent "one 1/(2π) per integrated k-dimension" rule. Because the
+    old frequency-convention I(fθ) formula carries fr·dfr (two variables
+    that pick up 2π factors under k = 2π·f), the resulting I_of_ktheta is
+    numerically 2π × (old I(fθ)) at the same physical mode. Multiply by
+    2π again if you need a direct match to an old-code normalisation.
+    """
+    spectrum           = jnp.asarray(spectrum)
+    k_x_coordinate     = jnp.asarray(k_x_coordinate).flatten()
+    k_y_coordinate     = jnp.asarray(k_y_coordinate).flatten()
+    k_rho_coordinate   = jnp.asarray(k_rho_coordinate).flatten()
+    k_theta_coordinate = jnp.asarray(k_theta_coordinate).flatten()
+
+    spectrum_intensity = jnp.abs(spectrum) ** 2
+
+    spectrum_intensity_polar = polar_transformation(
+        field=spectrum_intensity,
+        x_coordinate=k_x_coordinate, y_coordinate=k_y_coordinate,
+        rho_coordinate=k_rho_coordinate, theta_coordinate=k_theta_coordinate,
+        direction='Cartesian->Polar', type='scalar',
+    )                                                    # (Nρ, Nθ)
+
+    d_krho   = float(k_rho_coordinate[1]   - k_rho_coordinate[0])   \
+               if k_rho_coordinate.size   > 1 else 1.0
+    d_ktheta = float(k_theta_coordinate[1] - k_theta_coordinate[0]) \
+               if k_theta_coordinate.size > 1 else 1.0
+    two_pi   = 2 * jnp.pi
+
+    # I(k_ρ) = ∫ |·|² · k_ρ · dk_θ / (2π)      ← sum over θ (axis 1)
+    I_of_kr = jnp.nansum(spectrum_intensity_polar, axis=1) * k_rho_coordinate * d_ktheta / two_pi
+    # I(k_θ) = ∫ |·|² · k_ρ · dk_ρ / (2π)      ← sum over ρ (axis 0)
+    I_of_ktheta = jnp.nansum(
+        spectrum_intensity_polar * k_rho_coordinate[:, None], axis=0,
+    ) * d_krho / two_pi
+
+    return {
+        'spectrum_intensity_polar': spectrum_intensity_polar,
+        'I_of_kr':                  I_of_kr,
+        'I_of_ktheta':              I_of_ktheta,
+    }
+
+
+def get_2D_polar_spectrum_from_2D_field_with_coordinate(
+    field: jnp.ndarray,
+    x_coordinate: jnp.ndarray,
+    y_coordinate: jnp.ndarray,
+    k_rho_coordinate: jnp.ndarray,
+    k_theta_coordinate: jnp.ndarray,
+    out_sharding=None,
+    pad: bool = True,
+):
+    """
+    Convenience wrapper: 2-D FFT the input field with
+    `get_spectrum_from_field_with_coordinate`, then feed the resulting
+    Cartesian spectrum to
+    `get_2D_polar_spectrum_from_2D_cartesian_spectrum`.
+
+    The Cartesian spectrum and its k-axes are also returned in the dict so
+    callers can inspect / mask / re-use them.
+
+    Parameters
+    ----------
+    field : (Nx, Ny) real or complex.
+    x_coordinate, y_coordinate : 1-D ascending (m).
+    k_rho_coordinate, k_theta_coordinate : polar target grid — see
+        `get_2D_polar_spectrum_from_2D_cartesian_spectrum`.
+    out_sharding, pad : forwarded to `get_spectrum_from_field_with_coordinate`.
+
+    Returns
+    -------
+    dict with the polar keys from
+    `get_2D_polar_spectrum_from_2D_cartesian_spectrum` plus:
+        spectrum       : (Nkx_pad, Nky_pad) complex Cartesian k-spectrum
+        k_x_coordinate : (Nkx_pad,) rad/m
+        k_y_coordinate : (Nky_pad,) rad/m
+        pad_slices     : slice tuple that strips the FFT padding
+    """
+    spectrum, k_coords, pad_slices = get_spectrum_from_field_with_coordinate(
+        field=field,
+        axis=(0, 1),
+        r_coordinate_each_axis=[x_coordinate, y_coordinate],
+        out_sharding=out_sharding,
+        pad=pad,
+    )
+    k_x_coordinate, k_y_coordinate = k_coords
+
+    result = get_2D_polar_spectrum_from_2D_cartesian_spectrum(
+        spectrum=spectrum,
+        k_x_coordinate=k_x_coordinate,
+        k_y_coordinate=k_y_coordinate,
+        k_rho_coordinate=k_rho_coordinate,
+        k_theta_coordinate=k_theta_coordinate,
+    )
+    result['spectrum']       = spectrum
+    result['k_x_coordinate'] = k_x_coordinate
+    result['k_y_coordinate'] = k_y_coordinate
+    result['pad_slices']     = pad_slices
+    return result
