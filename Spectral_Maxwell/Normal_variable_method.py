@@ -1,54 +1,15 @@
 from functools import partial
 import sys
-import subprocess
 sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336')
 from typing import Optional
 from line_profiler import profile
 import numpy as np
 
+from EM_analyzer.device_config import configure_jax_backend
+_backend_info = configure_jax_backend()
+USE_GPU = _backend_info['USE_GPU']
 
-def _detect_gpu_count():
-    """Count NVIDIA GPUs via `nvidia-smi` without initializing JAX."""
-    try:
-        result = subprocess.run(
-            ['nvidia-smi', '--list-gpus'],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            print(f"Detected {len(result.stdout.strip().splitlines())} NVIDIA GPUs via nvidia-smi.", flush=True)
-            return sum(1 for line in result.stdout.strip().split('\n') if line.strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
-    return 0
-
-
-import os
 import jax
-
-# Honor an existing CPU pin set by the caller before this module was imported
-# (either via JAX_PLATFORMS=cpu env var or a prior jax.config.update).
-_user_forced_cpu = (
-    os.environ.get('JAX_PLATFORMS', '').lower() == 'cpu'
-    or jax.config.values.get('jax_platform_name') == 'cpu'
-)
-USE_GPU = (not _user_forced_cpu) and _detect_gpu_count() >= 2
-
-if USE_GPU:
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update('jax_platform_name', 'gpu')
-else:
-    # Don't override JAX_NUM_CPU_DEVICES if the caller has already set it
-    # (e.g. multi-process slurm jobs use a smaller per-process count).
-    if not os.environ.get('JAX_NUM_CPU_DEVICES'):
-        jax.config.update('jax_num_cpu_devices', 6)
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update('jax_platform_name', 'cpu')
-print(
-    f"Backend: {'GPU' if USE_GPU else 'CPU'}, "
-    f"local devices: {jax.local_device_count()}, global devices: {jax.device_count()}",
-    flush=True,
-)
-print(jax.devices(), flush=True)
 from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
 from jax import jit
 import jax.numpy as jnp
