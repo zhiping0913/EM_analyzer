@@ -82,6 +82,7 @@ def plot_multiple_1D_fields(
         ax.set_xlabel(xlabel,fontsize=20)
         ax.set_ylabel(ylabel,fontsize=20)
     ax.set_title(name,fontsize=20)
+    ax.grid(True, which='both', alpha=0.25)
     if xmin is not None and xmax is not None:
         ax.set_xlim(xmin,xmax)
     if ymin is not None and ymax is not None:
