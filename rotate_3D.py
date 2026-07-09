@@ -1,3 +1,71 @@
+"""
+Rigid rotation of a 3-D scalar / vector field between two Cartesian frames.
+
+Rotation setup
+--------------
+Consider a source frame `x0-y0-z0` with orthonormal unit vectors
+`e_{x0}, e_{y0}, e_{z0}`. A vector field in this frame reads
+
+    A = A_{x0} e_{x0} + A_{y0} e_{y0} + A_{z0} e_{z0}.
+
+We want the same field expressed in a rotated frame `x1-y1-z1`. The rotated
+unit vectors are defined by three Euler angles `(phi, psi, theta)`:
+
+    e_{x1} = ( cos φ cos ψ cos θ − sin φ sin ψ) e_{x0}
+           + ( cos φ sin ψ cos θ + sin φ cos ψ) e_{y0}
+           −   cos φ sin θ                     e_{z0}
+
+    e_{y1} = (−sin φ cos ψ cos θ − cos φ sin ψ) e_{x0}
+           + (−sin φ sin ψ cos θ + cos φ cos ψ) e_{y0}
+           +   sin φ sin θ                     e_{z0}
+
+    e_{z1} =   cos ψ sin θ e_{x0}
+           +   sin ψ sin θ e_{y0}
+           +   cos θ       e_{z0}
+
+The 3 × 3 rotation matrix built by `generate_rotation_matrix(phi, psi, theta)`
+has these unit vectors as its rows, so component transformation is
+
+    [A_{x1}]       [A_{x0}]
+    [A_{y1}] = R · [A_{y0}]
+    [A_{z1}]       [A_{z0}]
+
+and A = A_{x0} e_{x0} + A_{y0} e_{y0} + A_{z0} e_{z0}
+     = A_{x1} e_{x1} + A_{y1} e_{y1} + A_{z1} e_{z1}.
+
+Physical meaning of (phi, psi, theta)
+-------------------------------------
+The three angles come from the standard optics geometry of a plane wave
+striking a flat surface. Place the surface in the `z0 = 0` plane; its normal
+is `e_n = e_{z0}`. Shine a monochromatic wave whose k-vector direction is
+`e_k`. Choose the rotated frame so that `e_k = e_{z1}`. Then:
+
+* **θ — incidence angle.** By construction ⟨e_n, e_k⟩ = ⟨e_{z0}, e_{z1}⟩ = θ.
+
+* **ψ — orientation of the plane of incidence.** The s-polarization direction is
+        e_s = (e_n × e_k) / |e_n × e_k| = −sin ψ · e_{x0} + cos ψ · e_{y0},
+    so ⟨e_{y0}, e_s⟩ = ψ. Rotating ψ swings the plane of incidence about the
+    surface normal.
+
+* **φ — polarization angle in the plane of incidence.** The p-polarization
+    direction is
+        e_p = e_s × e_k = cos ψ cos θ · e_{x0} + sin ψ cos θ · e_{y0} − sin θ · e_{z0}.
+    If the wave's electric field points along `e_{x1}`, then
+        ⟨e_{x1}, e_p⟩ = arccos(e_{x1} · e_p) = arccos(cos φ) = φ.
+    So φ = 0 is pure p-polarization, φ = π/2 is pure s-polarization.
+
+Public API
+----------
+* `generate_rotation_matrix(phi, psi, theta)` → 3 × 3 rotation matrix `R`.
+* `rotate(A0, R, x0_coordinate, y0_coordinate, z0_coordinate,
+           x1_coordinate, y1_coordinate, z1_coordinate, type='vector'|'scalar')`
+  — resamples `A0` from the source grid onto the rotated grid via
+  `jax.scipy.ndimage.map_coordinates` (per-channel sharded when 3 devices are
+  available). When `type='vector'`, additionally applies `R` to rotate the
+  vector components; when `type='scalar'`, only the spatial remap is done.
+* `Rotation(phi, psi, theta)` — convenience class wrapping the matrix and the
+  rotate() call.
+"""
 import sys
 sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336')
 sys.path.append('/scratch/gpfs/MIKHAILOVA/zl8336/EM_analyzer')
