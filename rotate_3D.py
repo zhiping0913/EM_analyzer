@@ -1,6 +1,21 @@
 """
 Rigid rotation of a 3-D scalar / vector field between two Cartesian frames.
 
+The two frames used everywhere below
+-----------------------------------
+* **`x0-y0-z0` — lab frame.** Fixed in space. The surface (if any) sits in
+  `z0 = 0` with normal `e_n = e_{z0}`.
+* **`x1-y1-z1` — beam / eigen frame.** Attached to a monochromatic plane wave.
+  By construction the wave lives naturally in this frame:
+      - `e_{z1}` = k-vector direction (propagation),
+      - `e_{x1}` = E-field polarization,
+      - `e_{y1}` = B-field polarization (i.e. `e_{y1} ∝ e_{z1} × e_{x1}`).
+
+The rotation implemented in this module is exactly the change of basis
+between these two frames. Use it to (a) express a field written in the beam
+frame back in the lab frame, or (b) go the other direction and view lab-frame
+data along the beam's own axes.
+
 Rotation setup
 --------------
 Consider a source frame `x0-y0-z0` with orthonormal unit vectors
