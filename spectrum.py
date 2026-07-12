@@ -258,47 +258,77 @@ def get_envelope_from_field_with_coordinate(
 
 def filter_spectrum_by_k_coordinate(
     spectrum: jnp.ndarray,
-    k_coordinate_each_axis: List[jnp.ndarray],
-    axis: Union[int, Tuple[int, ...]],
+    k_coordinate_each_axis: Optional[List[jnp.ndarray]]=None,
+    axis: Optional[Union[int, Tuple[int, ...]]]=None,
     k_min: Optional[float]=0,
     k_max: Optional[float]=100000000000,
+    k_abs: Optional[jnp.ndarray]=None,
     ):
     """
     Filter the spectrum by k coordinate.
+
     Parameters
     ----------
     spectrum : jnp.ndarray
         Spectrum to be filtered.
-    k_coordinate_each_axis : List[jnp.ndarray]
-        List of k coordinate arrays for each axis. The length of this list should match the number of axes in the spectra.
-        Each k coordinate array should have a shape that matches the corresponding dimension of the spectra.
-    k_min : Optional[float], optional
-        Minimum k value for filtering. Default is 0.
-    k_max : Optional[float], optional
-        Maximum k value for filtering. Default is 100000000000.
+    k_coordinate_each_axis : List[jnp.ndarray], optional
+        List of k coordinate arrays for each axis. The length of this list
+        should match the number of axes in `axis`. Each k coordinate array
+        should have a shape that matches the corresponding dimension of the
+        spectrum. Ignored (and may be `None`) when `k_abs` is supplied.
+    axis : int or tuple of ints
+        Axes over which to compute |k|. If `None`, all axes are used.
+    k_min, k_max : float, optional
+        Retain modes with `k_min <= |k| <= k_max`.
+    k_abs : jnp.ndarray, optional
+        Pre-computed `|k|` on the sub-grid selected by `axis`. Must have shape
+        `tuple(spectrum.shape[a] for a in axis)`. When supplied, the internal
+        `meshgrid(...) + get_norm(...)` step is skipped — pass it when calling
+        this function many times on spectra that share the same k-grid (e.g.
+        inside a timestep loop where the k-axes are fixed).
+
     Returns
     -------
     spectrum_filter : jnp.ndarray
-        Filtered spectrum with the same shape as the input spectrum, but with values set to zero outside the specified k ranges.
+        Filtered spectrum, same shape as the input, with values set to zero
+        outside `[k_min, k_max]`.
     """
-    spectrum=jnp.asarray(spectrum,dtype=jnp.complex128)
-    shape=spectrum.shape
-    ndim=spectrum.ndim
+    spectrum = jnp.asarray(spectrum, dtype=jnp.complex128)
+    shape    = spectrum.shape
+    ndim     = spectrum.ndim
     if axis is None:
         axis = tuple(range(ndim))
     axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
     assert len(axis) > 0, "At least one axis must be specified."
-    assert len(k_coordinate_each_axis) == len(axis), "The length of k_coordinate_each_axis must match the length of axis."
-    k_coordinate_list=[]
-    for k_coordinate_i, axis_i in zip(k_coordinate_each_axis, axis):
-        k_coordinate_i=jnp.asarray(k_coordinate_i)
-        assert k_coordinate_i.size == shape[axis_i], f"The shape of k_coordinate must match the corresponding dimension of the spectrum. Expected shape: {shape[axis_i]}, but got {k_coordinate_i.size}."
-        k_coordinate_list.append(k_coordinate_i)
-    k_grid=jnp.stack(jnp.meshgrid(*k_coordinate_list, indexing='ij'), axis=0)
-    k_abs=get_norm(k_grid, axis=0)
-    mask=(k_abs>=k_min) & (k_abs<=k_max)
-    spectrum_filter=spectrum*mask
-    return spectrum_filter
+
+    if k_abs is None:
+        assert k_coordinate_each_axis is not None, (
+            "Supply either `k_abs` (pre-computed) or `k_coordinate_each_axis`."
+        )
+        assert len(k_coordinate_each_axis) == len(axis), (
+            "The length of k_coordinate_each_axis must match the length of axis."
+        )
+        k_coordinate_list = []
+        for k_coordinate_i, axis_i in zip(k_coordinate_each_axis, axis):
+            k_coordinate_i = jnp.asarray(k_coordinate_i)
+            assert k_coordinate_i.size == shape[axis_i], (
+                f"The shape of k_coordinate must match the corresponding "
+                f"dimension of the spectrum. Expected shape: {shape[axis_i]}, "
+                f"but got {k_coordinate_i.size}."
+            )
+            k_coordinate_list.append(k_coordinate_i)
+        k_grid = jnp.stack(jnp.meshgrid(*k_coordinate_list, indexing='ij'), axis=0)
+        k_abs  = get_norm(k_grid, axis=0)
+    else:
+        k_abs = jnp.asarray(k_abs)
+        expected_shape = tuple(shape[a] for a in axis)
+        assert k_abs.shape == expected_shape, (
+            f"k_abs.shape={k_abs.shape} must equal tuple(spectrum.shape[a] "
+            f"for a in axis)={expected_shape}."
+        )
+
+    mask = (k_abs >= k_min) & (k_abs <= k_max)
+    return spectrum * mask
 
 
 @partial(jax.jit)
