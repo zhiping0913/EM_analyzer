@@ -1118,7 +1118,7 @@ def validate_field_axis_coordinate(
     """
     field = jnp.asarray(field)
     shape = field.shape
-    ndim  = len(shape)
+    ndim  = field.ndim
     if axis is None:
         axis = tuple(range(ndim))
     axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
@@ -1126,15 +1126,13 @@ def validate_field_axis_coordinate(
     if coordinate_each_axis is None:
         coordinate_each_axis = [jnp.arange(shape[a]) for a in axis]
     assert len(coordinate_each_axis) == len(axis), (
-        f"len(coordinate_each_axis)={len(coordinate_each_axis)} must match "
-        f"len(axis)={len(axis)}."
+        f"len(coordinate_each_axis)={len(coordinate_each_axis)} must match len(axis)={len(axis)}."
     )
     cleaned = []
     for i, a in enumerate(axis):
         c = jnp.asarray(coordinate_each_axis[i]).flatten()
         assert c.size == shape[a], (
-            f"coordinate_each_axis[{i}].size={c.size} must match "
-            f"field.shape[axis={a}]={shape[a]}."
+            f"coordinate_each_axis[{i}].size={c.size} must match field.shape[axis={a}]={shape[a]}."
         )
         cleaned.append(c)
     return field, axis, cleaned
@@ -1188,8 +1186,7 @@ def get_peak_width(
     if rel_height_arr.size == 1:
         rel_height_arr = np.full(len(axis), float(rel_height_arr[0]))
     assert rel_height_arr.size == len(axis), (
-        f"len(rel_height_each_axis)={rel_height_arr.size} must match "
-        f"len(axis)={len(axis)}."
+        f"len(rel_height_each_axis)={rel_height_arr.size} must match len(axis)={len(axis)}."
     )
 
     # Global peak: full multi-index into `field`.
