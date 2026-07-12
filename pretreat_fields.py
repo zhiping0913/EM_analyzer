@@ -7,6 +7,7 @@ from wrapt import partial
 jax.config.update("jax_enable_x64", True)
 jax.config.update('jax_platform_name', 'cpu')
 from scipy.signal.windows import tukey
+from scipy.signal import peak_widths
 from scipy.ndimage import map_coordinates
 #from jax.scipy.ndimage import map_coordinates
 import jax.numpy as jnp
@@ -1085,3 +1086,143 @@ if __name__ == '__main__':
     print("All examples passed.")
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Field / axis / coordinate validation + per-axis peak-width measurement
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def validate_field_axis_coordinate(
+    field,
+    axis: Optional[Union[int, Tuple[int, ...], List[int]]],
+    coordinate_each_axis: Optional[List[jnp.ndarray]],
+):
+    """
+    Normalise a `(field, axis, coordinate_each_axis)` triple.
+
+    - `field` → `jnp.asarray(field)`.
+    - `axis` (int, tuple/list of ints, or None) → tuple of non-negative ints
+      via `np.mod(..., ndim)`. `None` means all axes.
+    - `coordinate_each_axis` → list of 1-D `jnp.ndarray`s. Each element is
+      flattened and its size is checked against the corresponding axis of
+      `field`. `None` defaults to `[jnp.arange(field.shape[a]) for a in axis]`.
+
+    Raises `AssertionError` on any mismatch.
+
+    Returns
+    -------
+    field                 : jnp.ndarray
+    axis                  : tuple[int, ...]
+    coordinate_each_axis  : list[jnp.ndarray]   (each 1-D, matching field shape)
+    """
+    field = jnp.asarray(field)
+    shape = field.shape
+    ndim  = len(shape)
+    if axis is None:
+        axis = tuple(range(ndim))
+    axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
+    assert len(axis) > 0, "At least one axis must be specified."
+    if coordinate_each_axis is None:
+        coordinate_each_axis = [jnp.arange(shape[a]) for a in axis]
+    assert len(coordinate_each_axis) == len(axis), (
+        f"len(coordinate_each_axis)={len(coordinate_each_axis)} must match "
+        f"len(axis)={len(axis)}."
+    )
+    cleaned = []
+    for i, a in enumerate(axis):
+        c = jnp.asarray(coordinate_each_axis[i]).flatten()
+        assert c.size == shape[a], (
+            f"coordinate_each_axis[{i}].size={c.size} must match "
+            f"field.shape[axis={a}]={shape[a]}."
+        )
+        cleaned.append(c)
+    return field, axis, cleaned
+
+
+def get_peak_width(
+    field,
+    axis: Optional[Union[int, Tuple[int, ...], List[int]]] = None,
+    rel_height_each_axis: Union[float, List[float], Tuple[float, ...]] = 0.5,
+    coordinate_each_axis: Optional[List[jnp.ndarray]] = None,
+):
+    """
+    Locate the global peak of `field` and measure its width along each
+    requested axis via `scipy.signal.peak_widths`, then map the fractional
+    left / right indices onto the physical coordinate of that axis.
+
+    Parameters
+    ----------
+    field : array_like
+        Any-dimensional non-negative envelope (or magnitude of a complex
+        signal — the function does not take `abs` for you).
+    axis : int | tuple/list of int | None
+        Axes to measure. `None` → every axis.
+    rel_height_each_axis : float | list[float]
+        Passed to `scipy.signal.peak_widths(rel_height=…)`. Same rules as
+        scipy: 0.5 → FWHM, 1 - 1/e → 1/e width, etc. A scalar broadcasts to
+        every axis; a list must match `len(axis)`.
+    coordinate_each_axis : list[1-D array] | None
+        Physical coordinate arrays, one per axis in `axis`. `None` → integer
+        indices.
+
+    Returns
+    -------
+    dict with
+        'max_id'     : tuple[int, ...]
+            Multi-index of the global maximum (one integer per dimension of
+            `field`, not just per requested axis).
+        'left_right' : list[[float, float]]
+            `[[x_left_1, x_right_1], [x_left_2, x_right_2], …]` — the physical
+            coordinates (from `coordinate_each_axis`) at which the peak drops
+            to `rel_height` for each requested axis, one entry per `axis`.
+        'width'      : list[float]
+            `[x_right_1 - x_left_1, …]` — the width in physical units for
+            each requested axis.
+    """
+    field, axis, coordinate_each_axis = validate_field_axis_coordinate(
+        field, axis, coordinate_each_axis,
+    )
+
+    rel_height_arr = np.asarray(rel_height_each_axis, dtype=np.float64).flatten()
+    if rel_height_arr.size == 1:
+        rel_height_arr = np.full(len(axis), float(rel_height_arr[0]))
+    assert rel_height_arr.size == len(axis), (
+        f"len(rel_height_each_axis)={rel_height_arr.size} must match "
+        f"len(axis)={len(axis)}."
+    )
+
+    # Global peak: full multi-index into `field`.
+    field_np = np.asarray(field)
+    max_id   = tuple(int(v) for v in np.unravel_index(int(np.argmax(field_np)), field_np.shape))
+
+    left_right_list: List[List[float]] = []
+    width_list:      List[float]       = []
+    for i, a in enumerate(axis):
+        # 1-D profile: fix every other axis at its max_id, leave axis `a` free.
+        slicer = list(max_id)
+        slicer[a] = slice(None)
+        profile = np.asarray(field[tuple(slicer)])
+
+        # scipy.signal.peak_widths returns (widths, height, left_ips, right_ips)
+        # in units of fractional array index.
+        _, _, left_ips, right_ips = peak_widths(
+            x=profile,
+            peaks=[int(max_id[a])],
+            rel_height=float(rel_height_arr[i]),
+        )
+        # Interpolate the fractional left/right indices onto the physical axis.
+        coord = np.asarray(coordinate_each_axis[i])
+        x_left, x_right = map_coordinates(
+            input=coord,
+            coordinates=[np.array([float(left_ips[0]), float(right_ips[0])])],
+            order=1,
+        )
+        left_right_list.append([float(x_left), float(x_right)])
+        width_list.append(float(x_right - x_left))
+
+    return {
+        'max_id':     max_id,
+        'left_right': left_right_list,
+        'width':      width_list,
+    }

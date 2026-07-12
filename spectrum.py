@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple, Union
 import string
 import xarray as xr
 from EM_analyzer.fft_backend import fftn,ifftn,fftfreq
-from EM_analyzer.pretreat_fields import pad_for_fft,get_norm,print_shard_layout
+from EM_analyzer.pretreat_fields import pad_for_fft,get_norm,print_shard_layout,validate_field_axis_coordinate
 from EM_analyzer.Spectral_Maxwell.kgrid import make_k_coordinate_from_r_coordinate,make_r_coordinate_from_k_coordinate
 from EM_analyzer.coordinate_transformation import polar_transformation
 from scipy.signal import hilbert
@@ -76,16 +76,9 @@ def get_spectrum_from_field_with_coordinate(
         Axis or axes along which to compute the spectrum. If an int is provided, it is converted to a tuple with one element.
         If axis is None, then the spectrum is computed along all axes of the input field.
     """
-    field=jnp.asarray(field)
-    shape=field.shape
-    ndim=len(shape)
-    if axis is None:
-        axis = tuple(range(ndim))
-    axis = tuple(np.mod(np.asarray(axis, dtype=int).flatten(), ndim))
-    assert len(axis) > 0, "At least one axis must be specified."
-    if r_coordinate_each_axis is None:
-        r_coordinate_each_axis=[jnp.arange(shape[axis_i]) for axis_i in axis]
-    assert len(r_coordinate_each_axis) == len(axis), "The length of r_coordinate_each_axis must match the length of axis."
+    field, axis, r_coordinate_each_axis = validate_field_axis_coordinate(
+        field, axis, r_coordinate_each_axis,
+    )
     if pad:
         field_pad, coordinate_pad_list, pad_slices=pad_for_fft(
             field=field,
