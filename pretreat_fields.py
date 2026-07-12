@@ -1170,6 +1170,8 @@ def get_peak_width(
         'max_id'     : tuple[int, ...]
             Multi-index of the global maximum (one integer per dimension of
             `field`, not just per requested axis).
+        'max_value'  : float
+            The peak value itself, `field[max_id]`.
         'left_right' : list[[float, float]]
             `[[x_left_1, x_right_1], [x_left_2, x_right_2], …]` — the physical
             coordinates (from `coordinate_each_axis`) at which the peak drops
@@ -1189,9 +1191,11 @@ def get_peak_width(
         f"len(rel_height_each_axis)={rel_height_arr.size} must match len(axis)={len(axis)}."
     )
 
-    # Global peak: full multi-index into `field`.
-    field_np = np.asarray(field)
-    max_id   = tuple(int(v) for v in np.unravel_index(int(np.argmax(field_np)), field_np.shape))
+    # Global peak: full multi-index into `field`, plus the peak value.
+    field_np  = np.asarray(field)
+    max_flat  = int(np.argmax(field_np))
+    max_id    = tuple(int(v) for v in np.unravel_index(max_flat, field_np.shape))
+    max_value = float(field_np.flat[max_flat])
 
     left_right_list: List[List[float]] = []
     width_list:      List[float]       = []
@@ -1220,6 +1224,7 @@ def get_peak_width(
 
     return {
         'max_id':     max_id,
+        'max_value':  max_value,
         'left_right': left_right_list,
         'width':      width_list,
     }
