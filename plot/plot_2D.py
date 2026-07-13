@@ -392,6 +392,10 @@ def plot_2D_field(
             f'{xlabel} = '
             + ', '.join(f'{x_coordinate[x_id]:.2f}' for x_id in profile_at_x_id_list)
         )
+        # Turn the panel legend back on only when there are multiple slices —
+        # a single slice is already fully described by the title.
+        if len(profile_at_x_id_list) > 1:
+            profile_x_dict['plot_legend']=True
 
     if plot_profile_y:
         field_dict_list_y = []
@@ -423,6 +427,8 @@ def plot_2D_field(
             f'{ylabel} = '
             + ', '.join(f'{y_coordinate[y_id]:.2f}' for y_id in profile_at_y_id_list)
         )
+        if len(profile_at_y_id_list) > 1:
+            profile_y_dict['plot_legend']=True
 
 
 
