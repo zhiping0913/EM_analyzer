@@ -359,8 +359,10 @@ def plot_2D_field(
     # Create colormap and normalizers for colors
     # Normalize based on index values for color mapping
 
-    profile_x_dict={'plot_legend':True,'scale':scale}
-    profile_y_dict={'plot_legend':True,'scale':scale}
+    # `plot_legend` is disabled because the side-panel legend text is too small
+    # to read; instead each panel's title carries the slice coordinates.
+    profile_x_dict={'plot_legend':False,'scale':scale}
+    profile_y_dict={'plot_legend':False,'scale':scale}
     if plot_profile_x:
         field_dict_list_x = []
         axvline_dict_list = []
@@ -386,6 +388,10 @@ def plot_2D_field(
         assert ax_profile_x_at in ['left','right']
         profile_x_dict['field_dict_list']=field_dict_list_x
         profile_y_dict['axvline_dict_list']=axvline_dict_list
+        profile_x_dict['title']=(
+            f'{xlabel} = '
+            + ', '.join(f'{x_coordinate[x_id]:.2f}' for x_id in profile_at_x_id_list)
+        )
 
     if plot_profile_y:
         field_dict_list_y = []
@@ -413,6 +419,10 @@ def plot_2D_field(
         assert ax_profile_y_at in ['top','bottom']
         profile_x_dict['axhline_dict_list']=axhline_dict_list
         profile_y_dict['field_dict_list']=field_dict_list_y
+        profile_y_dict['title']=(
+            f'{ylabel} = '
+            + ', '.join(f'{y_coordinate[y_id]:.2f}' for y_id in profile_at_y_id_list)
+        )
 
 
 
