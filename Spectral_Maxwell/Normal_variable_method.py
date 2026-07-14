@@ -371,11 +371,98 @@ class Spectral_Maxwell_Solver:
                 "z_coordinate": window_z_coordinate,   #shape=(Nz,), unit: m
             }
 
+    def evolution_batch(
+        self,
+        t_coordinate,
+        window_shift_velocity=jnp.array((0.0, 0.0, 0.0)),
+        t_chunk_size=None,
+    ):
+        """Batched full-grid evolution: same math as `evolution()`, but for a
+        whole array of times in one call.
+
+        Internally `lax.map`s over `t_coordinate` with `batch_size = t_chunk_size`
+        so multiple full-field IFFTs get vmapped (and XLA-fused) together —
+        exactly what you'd otherwise write as a `for t in t_arr` Python loop
+        of `evolution()` calls, but batched. `t_chunk_size` trades vectorized
+        throughput for transient memory: each chunk allocates
+        `t_chunk_size · (2·3·Nx_pad·Ny_pad·Nz_pad) · 16 B` for the complex
+        spectrum plus the same for the real field. Set as large as fits.
+
+        Args:
+            t_coordinate: (N_t,) times, s.
+            window_shift_velocity: (3,) m/s. Same meaning as in `evolution()`.
+                A single velocity applies to every t — the returned coordinate
+                arrays are the un-shifted `self.x/y/z_coordinate`; the physical
+                position of grid index i at time t is `x[i] + vx·t` (and same
+                for y, z).
+            t_chunk_size: `batch_size` for the t-map. None runs t sequentially.
+
+        Returns:
+            EB_evolution_batch_dict = {
+                "E":            (3, Nx, Ny, Nz, N_t), V/m,
+                "B":            (3, Nx, Ny, Nz, N_t), T,
+                "t_coordinate": (N_t,),
+                "x_coordinate": (Nx,), m,
+                "y_coordinate": (Ny,), m,
+                "z_coordinate": (Nz,), m,
+            }
+        """
+        t_arr = jnp.asarray(t_coordinate, dtype=jnp.float64).flatten()   # (N_t,)
+        v = jnp.array(window_shift_velocity, dtype=jnp.float64).flatten()
+        assert v.shape == (3,), f"window_shift_velocity must be length-3, got {v.shape}"
+
+        # Refresh the k·v/c cache (same logic as evolution()).
+        if (self._last_window_shift_velocity is None
+                or not jnp.array_equal(v, self._last_window_shift_velocity)):
+            self._k_dot_v_over_c = jnp.einsum(
+                'lijk,l->ijk', self.k_hat, v / C.speed_of_light,
+            )
+            self._last_window_shift_velocity = v
+
+        # Per-t worker: evolve in k-space, IFFT to real, unpad. Uses negative
+        # axes so it's safe when lax.map's internal vmap adds a leading axis.
+        def _at_one_t(t):
+            EMk_t = evolution_t(
+                omega_dot_t=self.omega * t,
+                EMk0=self.EMk0,
+                signed_k_cross_partner=self.signed_k_cross_partner,
+                k_dot_v_over_c=self._k_dot_v_over_c,
+            )   # (2, 3, Nx_pad, Ny_pad, Nz_pad), sharded on ('EM','channel')
+            EM_field = get_field_from_spectrum_with_coordinate(
+                spectrum=EMk_t,
+                axis=(-3, -2, -1),
+                k_coordinate_each_axis=[
+                    self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
+                ],
+                pad_slices=self.pad_slices,
+                real=True,
+            )   # (2, 3, Nx, Ny, Nz), real
+            return EM_field
+
+        map_kwargs = {} if t_chunk_size is None else {'batch_size': int(t_chunk_size)}
+        EM_batch = jax.lax.map(_at_one_t, t_arr, **map_kwargs)   # (N_t, 2, 3, Nx, Ny, Nz)
+        # Move the t axis to the tail so the layout is consistent with
+        # evolution_at_points (which returns (..., N_point, N_t)).
+        EM_batch = jnp.moveaxis(EM_batch, 0, -1)                  # (2, 3, Nx, Ny, Nz, N_t)
+
+        E_batch = EM_batch[0]                                     # (3, Nx, Ny, Nz, N_t), V/m
+        B_batch = EM_batch[1] / C.speed_of_light                  # (3, Nx, Ny, Nz, N_t), T
+
+        return {
+            "E":            E_batch,
+            "B":            B_batch,
+            "t_coordinate": t_arr,
+            "x_coordinate": self.x_coordinate,
+            "y_coordinate": self.y_coordinate,
+            "z_coordinate": self.z_coordinate,
+        }
+
     def evolution_at_points(
         self,
         t_coordinate,
         x_point=None, y_point=None, z_point=None,
         t_chunk_size=None,
+        point_chunk_size=None,
     ):
         """Evaluate E(t) and B(t) at fixed lab-frame points over an array of times.
 
@@ -399,9 +486,9 @@ class Spectral_Maxwell_Solver:
         cos(ω·t) (which only depends on t) nor point_phase (which only
         depends on r0) is recomputed. Memory cost is a persistent tensor
         of shape (N_point, Nkx, Nky, Nkz) — roughly N_point·Nk·16 B — so
-        this method is best when that fits comfortably; for very large
-        N_point × Nk on a full 3-D grid, split the call over point
-        batches externally.
+        for large N_point × Nk (e.g. sampling a fine grid off a padded
+        3-D k-grid) pass `point_chunk_size` to split the point axis into
+        chunks that each fit; results are concatenated on return.
 
         Args:
             t_coordinate: (N_t,) times, s.
@@ -412,6 +499,11 @@ class Spectral_Maxwell_Solver:
                 `batch_size` — larger = more vectorized throughput but
                 more transient memory for the per-chunk cos/sin buffers.
                 None (default) processes t sequentially.
+            point_chunk_size: optional int; if set, the point axis is
+                processed in Python-level chunks of this size and the
+                per-chunk results are concatenated. Use when
+                `N_point · Nkx · Nky · Nkz · 16 B` doesn't fit in memory.
+                None (default) computes all points at once.
 
         Returns:
             EB_evolution_dict = {
@@ -461,15 +553,36 @@ class Spectral_Maxwell_Solver:
             zs - self._r_offset_z,
         ], axis=-1)   # (N_point, 3)
 
-        EMk_at_points = _evolution_at_points_all_t(
-            rts,
-            t_arr,
-            self.EMk0, self.signed_k_cross_partner,
-            self.omega,
-            self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
-            self._point_inverse_normalization,
-            None if t_chunk_size is None else int(t_chunk_size),
-        )   # (2, 3, N_point, N_t)
+        _t_chunk = None if t_chunk_size is None else int(t_chunk_size)
+        if point_chunk_size is None or point_chunk_size >= N_point:
+            EMk_at_points = _evolution_at_points_all_t(
+                rts,
+                t_arr,
+                self.EMk0, self.signed_k_cross_partner,
+                self.omega,
+                self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
+                self._point_inverse_normalization,
+                _t_chunk,
+            )   # (2, 3, N_point, N_t)
+        else:
+            # Split points in Python and concatenate; keeps the persistent
+            # point_phase_all tensor to size (point_chunk_size, Nkx, Nky, Nkz).
+            _p_chunk = int(point_chunk_size)
+            chunks = []
+            for start in range(0, N_point, _p_chunk):
+                end = min(start + _p_chunk, N_point)
+                chunks.append(
+                    _evolution_at_points_all_t(
+                        rts[start:end],
+                        t_arr,
+                        self.EMk0, self.signed_k_cross_partner,
+                        self.omega,
+                        self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
+                        self._point_inverse_normalization,
+                        _t_chunk,
+                    )   # (2, 3, chunk, N_t)
+                )
+            EMk_at_points = jnp.concatenate(chunks, axis=2)   # (2, 3, N_point, N_t)
 
         E_at_points = EMk_at_points[0]                          # (3, N_point, N_t), V/m
         B_at_points = EMk_at_points[1] / C.speed_of_light       # (3, N_point, N_t), T
@@ -560,11 +673,40 @@ class Spectral_Maxwell_Solver_1D():
             'x_coordinate': window_x_coordinate,
         }
 
+    def evolution_batch(
+        self,
+        t_coordinate,
+        window_shift_velocity=0.0,
+        t_chunk_size=None,
+    ):
+        """See `Spectral_Maxwell_Solver.evolution_batch`.
+
+        1-D thin wrapper: y and z axes are degenerate.
+        """
+        v3 = jnp.pad(
+            jnp.array(window_shift_velocity, dtype=jnp.float64).flatten(),
+            pad_width=((0, 2),),
+        )   # (3,)
+        result = self.Solver.evolution_batch(
+            t_coordinate=t_coordinate,
+            window_shift_velocity=v3,
+            t_chunk_size=t_chunk_size,
+        )
+        E = result["E"][:, :, 0, 0, :]     # (3, Nx, N_t)
+        B = result["B"][:, :, 0, 0, :]
+        return {
+            "Ex": E[0], "Ey": E[1], "Ez": E[2],
+            "Bx": B[0], "By": B[1], "Bz": B[2],
+            "t_coordinate": result["t_coordinate"],
+            "x_coordinate": result["x_coordinate"],
+        }
+
     def evolution_at_points(
         self,
         t_coordinate,
         x_point=None,
         t_chunk_size=None,
+        point_chunk_size=None,
     ):
         """See `Spectral_Maxwell_Solver.evolution_at_points`.
 
@@ -574,6 +716,7 @@ class Spectral_Maxwell_Solver_1D():
             t_coordinate=t_coordinate,
             x_point=x_point, y_point=None, z_point=None,
             t_chunk_size=t_chunk_size,
+            point_chunk_size=point_chunk_size,
         )
         return {
             "E":            result["E"],             # (3, N_point, N_t)
@@ -665,11 +808,42 @@ class Spectral_Maxwell_Solver_2D():
             'y_coordinate': window_y_coordinate,
         }
 
+    def evolution_batch(
+        self,
+        t_coordinate,
+        window_shift_velocity=(0.0, 0.0),
+        t_chunk_size=None,
+    ):
+        """See `Spectral_Maxwell_Solver.evolution_batch`.
+
+        2-D thin wrapper: the z-axis is degenerate and dropped from the
+        returned dict.
+        """
+        v3 = jnp.pad(
+            jnp.array(window_shift_velocity, dtype=jnp.float64).flatten(),
+            pad_width=((0, 1),),
+        )   # (3,)
+        result = self.Solver.evolution_batch(
+            t_coordinate=t_coordinate,
+            window_shift_velocity=v3,
+            t_chunk_size=t_chunk_size,
+        )
+        E = result["E"][:, :, :, 0, :]     # (3, Nx, Ny, N_t)
+        B = result["B"][:, :, :, 0, :]
+        return {
+            "Ex": E[0], "Ey": E[1], "Ez": E[2],
+            "Bx": B[0], "By": B[1], "Bz": B[2],
+            "t_coordinate": result["t_coordinate"],
+            "x_coordinate": result["x_coordinate"],
+            "y_coordinate": result["y_coordinate"],
+        }
+
     def evolution_at_points(
         self,
         t_coordinate,
         x_point=None, y_point=None,
         t_chunk_size=None,
+        point_chunk_size=None,
     ):
         """See `Spectral_Maxwell_Solver.evolution_at_points`.
 
@@ -680,6 +854,7 @@ class Spectral_Maxwell_Solver_2D():
             t_coordinate=t_coordinate,
             x_point=x_point, y_point=y_point, z_point=None,
             t_chunk_size=t_chunk_size,
+            point_chunk_size=point_chunk_size,
         )
         return {
             "E":            result["E"],             # (3, N_point, N_t)
