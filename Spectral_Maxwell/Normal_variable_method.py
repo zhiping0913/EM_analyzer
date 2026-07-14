@@ -376,11 +376,20 @@ class Spectral_Maxwell_Solver:
     ):
         """Evaluate E(t) and B(t) at fixed lab-frame points over an array of times.
 
-        The k-space spectrum is evolved in the normal-variable basis and
-        inverse-Fourier-transformed pointwise via a physical Riemann sum, so
-        each point is bandlimited-interpolated to arbitrary sub-grid precision
-        without the O(N^d log N) cost of a full IFFT per t. No window shift —
-        r0 is fixed in the lab frame and the pulse drifts past it naturally.
+        Compared to `evolution()`: the integrand is the same continuous
+        inverse Fourier kernel
+
+            f(r0, t) = (1/(2π)^n) · ∫ FE(k, t) · exp(i k·r0) dk
+
+        but instead of asking for the field on the full padded grid — where
+        the FFT butterfly wins at O(N log N) total — we ask for it at a
+        user-chosen set of points and evaluate the Riemann sum directly, at
+        O(N) per point. That trade gives up FFT's log-N speedup in exchange
+        for two things: (1) **point-selection freedom** — we compute nothing
+        for the grid points we don't care about; (2) **sub-grid resolution**
+        — r0 is a real number, not a grid index, so the returned value is
+        the exact bandlimited-sinc-interpolated field. No window shift: r0
+        is fixed in the lab frame and the pulse drifts past it naturally.
 
         For each (point, t) the evaluation cost is O(Nkx·Nky·Nkz), and
         `lax.map` over points/t chunks bounds intermediate memory.
