@@ -112,15 +112,16 @@ def initialize_EMk0(EMk0, k_hat, k_mask):
     return jax.device_put(EMk0_proj, sharding_EM), jax.device_put(signed_k_cross_partner, sharding_EM)
 
 
-@partial(jit)
-def _evolution_at_one_point_all_t(
-    x0, y0, z0,
+@partial(jit, static_argnames=('point_chunk_size',))
+def _evolution_at_points_all_t(
+    rts,
     t_arr,
     EMk0, signed_k_cross_partner, omega,
     kx, ky, kz,
     normalization,
+    point_chunk_size,
 ):
-    """Reconstruct E, B*c at a single lab-frame point (x0, y0, z0) for every t.
+    """Reconstruct E, B*c at every point in `rts` for every t in `t_arr`.
 
     Physical (Riemann-sum) inverse of the 0-centered spectrum, matching the
     same normalization as `get_field_from_spectrum_with_coordinate`:
@@ -132,11 +133,16 @@ def _evolution_at_one_point_all_t(
 
         EMk(k, t) = EMk0(k)·cos(ω·t) + signed_k_cross_partner(k)·sin(ω·t)
 
-    No window-shift phase — the whole point of a fixed-r0 sweep is to see
-    the pulse naturally drift past the point.
+    Loop nesting: outer `lax.map` over t, inner `lax.map` over points. That
+    way ω·t / cos(ω·t) / sin(ω·t) — all (Nkx·Nky·Nkz) tensors that only
+    depend on t — are computed once per t and shared across every point in
+    the inner map. (The dual redundancy is point_phase across t; symmetric
+    trade-off, but per-point cos/sin was the concrete waste the user asked
+    about.) No window-shift phase — the whole point of a fixed-r0 sweep is
+    to see the pulse naturally drift past the point.
 
     Args:
-        x0, y0, z0: scalar coordinates of the evaluation point, m.
+        rts:        (N_point, 3), lab-frame coordinates, m. Column order (x,y,z).
         t_arr:      (N_t,) times, s.
         EMk0:       (2, 3, Nkx, Nky, Nkz) transversally-projected k-space
                     fields at t=0 (units V·m³, matching evolution_t's EMk0).
@@ -145,32 +151,41 @@ def _evolution_at_one_point_all_t(
         omega:      (Nkx, Nky, Nkz), rad/s.
         kx, ky, kz: replicated 1-D k-axes.
         normalization: scalar (Δkx·Δky·Δkz / (2π)^3), 1/m^3.
+        point_chunk_size: passed as `batch_size` to the inner (point) map;
+                    None runs it sequentially.
 
     Returns:
-        EMk_at_one_point_at_all_t: (2, 3, N_t), real (E, B*c).
+        EMk_at_points_all_t: (2, 3, N_point, N_t), real (E, B*c).
     """
-    k_dot_r = (
-        kx[:, None, None] * x0
-        + ky[None, :, None] * y0
-        + kz[None, None, :] * z0
-    )   # (Nkx, Nky, Nkz)
-    point_phase = jnp.exp(1j * k_dot_r)   # (Nkx, Nky, Nkz), complex
+    point_map_kwargs = (
+        {} if point_chunk_size is None else {'batch_size': int(point_chunk_size)}
+    )
 
     def _at_time(t):
         omega_t = omega * t                                              # (Nkx, Nky, Nkz)
         coswt = jnp.cos(omega_t)                                         # (Nkx, Nky, Nkz)
         sinwt = jnp.sin(omega_t)                                         # (Nkx, Nky, Nkz)
-        term_cos = jnp.einsum(
-            'cmxyz,xyz->cm', EMk0, point_phase * coswt,
-        )                                                                # (2, 3), complex
-        term_sin = jnp.einsum(
-            'cmxyz,xyz->cm', signed_k_cross_partner, point_phase * sinwt,
-        )                                                                # (2, 3), complex
-        return normalization * (term_cos + term_sin)                     # (2, 3), complex
 
-    EMk_over_t = jax.lax.map(_at_time, t_arr)          # (N_t, 2, 3), complex
+        def _at_point(rt):
+            k_dot_r = (
+                kx[:, None, None] * rt[0]
+                + ky[None, :, None] * rt[1]
+                + kz[None, None, :] * rt[2]
+            )                                                            # (Nkx, Nky, Nkz)
+            point_phase = jnp.exp(1j * k_dot_r)                          # (Nkx, Nky, Nkz), complex
+            term_cos = jnp.einsum(
+                'cmxyz,xyz->cm', EMk0, point_phase * coswt,
+            )                                                            # (2, 3), complex
+            term_sin = jnp.einsum(
+                'cmxyz,xyz->cm', signed_k_cross_partner, point_phase * sinwt,
+            )                                                            # (2, 3), complex
+            return normalization * (term_cos + term_sin)                 # (2, 3), complex
+
+        return jax.lax.map(_at_point, rts, **point_map_kwargs)           # (N_point, 2, 3), complex
+
+    EMk_over_t = jax.lax.map(_at_time, t_arr)          # (N_t, N_point, 2, 3), complex
     # Take real part: E and B*c are real; imag is numerical noise.
-    return jnp.real(jnp.transpose(EMk_over_t, (1, 2, 0)))   # (2, 3, N_t)
+    return jnp.real(jnp.transpose(EMk_over_t, (2, 3, 1, 0)))   # (2, 3, N_point, N_t)
 
 
 class Spectral_Maxwell_Solver:
@@ -417,27 +432,25 @@ class Spectral_Maxwell_Solver:
         # 2. Time axis.
         t_arr = jnp.asarray(t_coordinate, dtype=jnp.float64).flatten()   # (N_t,)
 
-        # 3. Bind non-point args once so lax.map only carries (x0,y0,z0).
-        # Shift the physical points by the FFT r-offset so exp(i·k·r_shifted)
-        # in the Riemann sum yields the field at the physical r0.
-        xs_shifted = xs - self._r_offset_x
-        ys_shifted = ys - self._r_offset_y
-        zs_shifted = zs - self._r_offset_z
+        # 3. Shift the physical points by the FFT r-offset so exp(i·k·r_shifted)
+        # in the Riemann sum yields the field at the physical r0. Then call
+        # the core kernel — it does the (t outer, points inner) double lax.map
+        # so ω·t / cos·t / sin·t are computed once per t, not once per (point,t).
+        rts = jnp.stack([
+            xs - self._r_offset_x,
+            ys - self._r_offset_y,
+            zs - self._r_offset_z,
+        ], axis=-1)   # (N_point, 3)
 
-        def _one_point(rt):
-            return _evolution_at_one_point_all_t(
-                rt[0], rt[1], rt[2],
-                t_arr,
-                self.EMk0, self.signed_k_cross_partner,
-                self.omega,
-                self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
-                self._point_inverse_normalization,
-            )   # (2, 3, N_t)
-
-        rts = jnp.stack([xs_shifted, ys_shifted, zs_shifted], axis=-1)   # (N_point, 3)
-        map_kwargs = {} if chunk_size is None else {'batch_size': int(chunk_size)}
-        EMk_at_points = jax.lax.map(_one_point, rts, **map_kwargs)   # (N_point, 2, 3, N_t)
-        EMk_at_points = jnp.transpose(EMk_at_points, (1, 2, 0, 3))   # (2, 3, N_point, N_t)
+        EMk_at_points = _evolution_at_points_all_t(
+            rts,
+            t_arr,
+            self.EMk0, self.signed_k_cross_partner,
+            self.omega,
+            self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
+            self._point_inverse_normalization,
+            None if chunk_size is None else int(chunk_size),
+        )   # (2, 3, N_point, N_t)
 
         E_at_points = EMk_at_points[0]                          # (3, N_point, N_t), V/m
         B_at_points = EMk_at_points[1] / C.speed_of_light       # (3, N_point, N_t), T
