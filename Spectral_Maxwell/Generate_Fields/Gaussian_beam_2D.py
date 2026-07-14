@@ -56,7 +56,7 @@ class Gaussian_Beam_2D:
         self.amp=self.a0*self.Ec   #unit: V/m
         
         self.dr = wavelength / r_resolution  # real space
-        self.Nr = round(max(r_resolution*k_resolution/2,2.5*self.w0/self.dr))
+        self.Nr = round(max(r_resolution*k_resolution/2,3.5*self.w0/self.dr))
         self.Nx = 2 * self.Nr+1
         
         # grid in real space
@@ -159,7 +159,7 @@ class Gaussian_Beam_2D:
         """
         tau_time=FWHM_time/jnp.sqrt(2*jnp.log(2))
         # calculate the temporal envelope
-        Nz=2*max(round(3*FWHM_time*C.speed_of_light/self.dx), round(self.Nr*jnp.sin(theta)))+1
+        Nz=2*max(round(5*FWHM_time*C.speed_of_light/self.dx), round(self.Nr*jnp.sin(theta)))+1
         z_coordinate=jnp.linspace(-Nz//2*self.dx, Nz//2*self.dx, Nz,endpoint=True,dtype=jnp.float64)  # z位置 (米
         optical_path=self.compute_optical_path(z_coordinate=z_coordinate)   #shape: (Nx, 1, Nz)
         envelope=jnp.exp(-jnp.square((optical_path/C.speed_of_light)/tau_time))   #shape: (Nx, 1, Nz)

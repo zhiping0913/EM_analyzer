@@ -887,8 +887,8 @@ def _shift_field(field: jnp.ndarray, coordinates: jnp.ndarray) -> jnp.ndarray:
         input=field,
         coordinates=coordinates,
         order=5,
-        mode='nearest',
-        #cval=0.0,
+        mode='constant',
+        cval=0.0,
     )
 
 
