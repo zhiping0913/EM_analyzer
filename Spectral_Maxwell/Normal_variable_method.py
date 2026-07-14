@@ -339,9 +339,15 @@ class Spectral_Maxwell_Solver:
             k_dot_v_over_c=self._k_dot_v_over_c,
         )   #shape=(2, 3, Nx_pad, Ny_pad, Nz_pad)
         if return_spectrum:
+            Ek = EMk_evolution_in_window[0]                            #shape=(3, Nx_pad, Ny_pad, Nz_pad), V·m³
+            Bk = EMk_evolution_in_window[1] / C.speed_of_light         #shape=(3, Nx_pad, Ny_pad, Nz_pad), T·m
             return {
-                "Ek": EMk_evolution_in_window[0],   #shape=(3, Nx_pad, Ny_pad, Nz_pad), unit: V·m³
-                "Bk": EMk_evolution_in_window[1] / C.speed_of_light,   #shape=(3, Nx_pad, Ny_pad, Nz_pad), unit: T·m
+                # stacked
+                "Ek": Ek,
+                "Bk": Bk,
+                # component slices — 0-copy views on the stacked array
+                "Ex_spectrum": Ek[0], "Ey_spectrum": Ek[1], "Ez_spectrum": Ek[2],
+                "Bx_spectrum": Bk[0], "By_spectrum": Bk[1], "Bz_spectrum": Bk[2],
                 "kx_coordinate": self.kx_coordinate,   #shape=(Nx_pad,), unit: rad/m
                 "ky_coordinate": self.ky_coordinate,   #shape=(Ny_pad,), unit: rad/m
                 "kz_coordinate": self.kz_coordinate,   #shape=(Nz_pad,), unit: rad/m
@@ -364,8 +370,12 @@ class Spectral_Maxwell_Solver:
             B_evolution_in_window = EM_field_evolution[1] / C.speed_of_light   #shape=(3, Nx, Ny, Nz), unit: T
 
             return {
-                "E": E_evolution_in_window,   #shape=(3, Nx, Ny, Nz), unit: V/m
-                "B": B_evolution_in_window,   #shape=(3, Nx, Ny, Nz), unit: T
+                # stacked
+                "E": E_evolution_in_window,   #shape=(3, Nx, Ny, Nz), V/m
+                "B": B_evolution_in_window,   #shape=(3, Nx, Ny, Nz), T
+                # component slices — 0-copy views on the stacked array
+                "Ex": E_evolution_in_window[0], "Ey": E_evolution_in_window[1], "Ez": E_evolution_in_window[2],
+                "Bx": B_evolution_in_window[0], "By": B_evolution_in_window[1], "Bz": B_evolution_in_window[2],
                 "x_coordinate": window_x_coordinate,   #shape=(Nx,), unit: m
                 "y_coordinate": window_y_coordinate,   #shape=(Ny,), unit: m
                 "z_coordinate": window_z_coordinate,   #shape=(Nz,), unit: m
@@ -449,8 +459,12 @@ class Spectral_Maxwell_Solver:
         B_batch = EM_batch[1] / C.speed_of_light                  # (3, Nx, Ny, Nz, N_t), T
 
         return {
-            "E":            E_batch,
-            "B":            B_batch,
+            # stacked
+            "E": E_batch,
+            "B": B_batch,
+            # component slices — 0-copy views
+            "Ex": E_batch[0], "Ey": E_batch[1], "Ez": E_batch[2],
+            "Bx": B_batch[0], "By": B_batch[1], "Bz": B_batch[2],
             "t_coordinate": t_arr,
             "x_coordinate": self.x_coordinate,
             "y_coordinate": self.y_coordinate,
@@ -588,8 +602,12 @@ class Spectral_Maxwell_Solver:
         B_at_points = EMk_at_points[1] / C.speed_of_light       # (3, N_point, N_t), T
 
         return {
-            "E":            E_at_points,
-            "B":            B_at_points,
+            # stacked
+            "E": E_at_points,
+            "B": B_at_points,
+            # component slices — 0-copy views
+            "Ex": E_at_points[0], "Ey": E_at_points[1], "Ez": E_at_points[2],
+            "Bx": B_at_points[0], "By": B_at_points[1], "Bz": B_at_points[2],
             "t_coordinate": t_arr,
             "x_coordinate": xs,
             "y_coordinate": ys,
@@ -646,16 +664,16 @@ class Spectral_Maxwell_Solver_1D():
             return_spectrum=return_spectrum,
         )
         if return_spectrum:
-            Ek = result['Ek']   # (3, Nx_pad, 1, 1)
-            Bk = result['Bk']   # (3, Nx_pad, 1, 1)
+            Ek = result['Ek'][:, :, 0, 0]   # (3, Nx_pad) — strip y, z degenerate axes
+            Bk = result['Bk'][:, :, 0, 0]
             window_x_coordinate = self.x_coordinate + window_shift_velocity_3d[0] * evolution_time
             return {
-                'Ex_spectrum':   Ek[0, :, 0, 0],   # (Nx_pad,)
-                'Ey_spectrum':   Ek[1, :, 0, 0],
-                'Ez_spectrum':   Ek[2, :, 0, 0],
-                'Bx_spectrum':   Bk[0, :, 0, 0],
-                'By_spectrum':   Bk[1, :, 0, 0],
-                'Bz_spectrum':   Bk[2, :, 0, 0],
+                # stacked
+                'Ek': Ek,
+                'Bk': Bk,
+                # component slices
+                'Ex_spectrum': Ek[0], 'Ey_spectrum': Ek[1], 'Ez_spectrum': Ek[2],
+                'Bx_spectrum': Bk[0], 'By_spectrum': Bk[1], 'Bz_spectrum': Bk[2],
                 'kx_coordinate': result['kx_coordinate'],
                 'pad_slices':    result['pad_slices'][:1],   # drop y, z pad-slices
                 'x_coordinate':  window_x_coordinate,
@@ -664,12 +682,12 @@ class Spectral_Maxwell_Solver_1D():
         B_evolution_in_window = result["B"][:, :, 0, 0]
         window_x_coordinate   = result["x_coordinate"]    # (Nx,)
         return {
-            'Ex': E_evolution_in_window[0, :],
-            'Ey': E_evolution_in_window[1, :],
-            'Ez': E_evolution_in_window[2, :],
-            'Bx': B_evolution_in_window[0, :],
-            'By': B_evolution_in_window[1, :],
-            'Bz': B_evolution_in_window[2, :],
+            # stacked
+            'E': E_evolution_in_window,
+            'B': B_evolution_in_window,
+            # component slices
+            'Ex': E_evolution_in_window[0], 'Ey': E_evolution_in_window[1], 'Ez': E_evolution_in_window[2],
+            'Bx': B_evolution_in_window[0], 'By': B_evolution_in_window[1], 'Bz': B_evolution_in_window[2],
             'x_coordinate': window_x_coordinate,
         }
 
@@ -695,6 +713,9 @@ class Spectral_Maxwell_Solver_1D():
         E = result["E"][:, :, 0, 0, :]     # (3, Nx, N_t)
         B = result["B"][:, :, 0, 0, :]
         return {
+            # stacked
+            "E": E, "B": B,
+            # component slices
             "Ex": E[0], "Ey": E[1], "Ez": E[2],
             "Bx": B[0], "By": B[1], "Bz": B[2],
             "t_coordinate": result["t_coordinate"],
@@ -718,9 +739,14 @@ class Spectral_Maxwell_Solver_1D():
             t_chunk_size=t_chunk_size,
             point_chunk_size=point_chunk_size,
         )
+        E = result["E"]   # (3, N_point, N_t)
+        B = result["B"]
         return {
-            "E":            result["E"],             # (3, N_point, N_t)
-            "B":            result["B"],             # (3, N_point, N_t)
+            # stacked
+            "E": E, "B": B,
+            # component slices
+            "Ex": E[0], "Ey": E[1], "Ez": E[2],
+            "Bx": B[0], "By": B[1], "Bz": B[2],
             "t_coordinate": result["t_coordinate"],  # (N_t,)
             "x_coordinate": result["x_coordinate"],  # (N_point,)
         }
@@ -776,17 +802,17 @@ class Spectral_Maxwell_Solver_2D():
             return_spectrum=return_spectrum,
         )
         if return_spectrum:
-            Ek = result['Ek']   # (3, Nx_pad, Ny_pad, 1)
-            Bk = result['Bk']   # (3, Nx_pad, Ny_pad, 1)
+            Ek = result['Ek'][:, :, :, 0]   # (3, Nx_pad, Ny_pad) — strip z
+            Bk = result['Bk'][:, :, :, 0]
             window_x_coordinate = self.x_coordinate + window_shift_velocity_3d[0] * evolution_time
             window_y_coordinate = self.y_coordinate + window_shift_velocity_3d[1] * evolution_time
             return {
-                'Ex_spectrum':   Ek[0, :, :, 0],   # (Nx_pad, Ny_pad)
-                'Ey_spectrum':   Ek[1, :, :, 0],
-                'Ez_spectrum':   Ek[2, :, :, 0],
-                'Bx_spectrum':   Bk[0, :, :, 0],
-                'By_spectrum':   Bk[1, :, :, 0],
-                'Bz_spectrum':   Bk[2, :, :, 0],
+                # stacked
+                'Ek': Ek,
+                'Bk': Bk,
+                # component slices
+                'Ex_spectrum': Ek[0], 'Ey_spectrum': Ek[1], 'Ez_spectrum': Ek[2],
+                'Bx_spectrum': Bk[0], 'By_spectrum': Bk[1], 'Bz_spectrum': Bk[2],
                 'kx_coordinate': result['kx_coordinate'],
                 'ky_coordinate': result['ky_coordinate'],
                 'pad_slices':    result['pad_slices'][:2],   # drop z pad-slice
@@ -798,12 +824,12 @@ class Spectral_Maxwell_Solver_2D():
         window_x_coordinate   = result["x_coordinate"]    # (Nx,)
         window_y_coordinate   = result["y_coordinate"]    # (Ny,)
         return {
-            'Ex': E_evolution_in_window[0, :, :],
-            'Ey': E_evolution_in_window[1, :, :],
-            'Ez': E_evolution_in_window[2, :, :],
-            'Bx': B_evolution_in_window[0, :, :],
-            'By': B_evolution_in_window[1, :, :],
-            'Bz': B_evolution_in_window[2, :, :],
+            # stacked
+            'E': E_evolution_in_window,
+            'B': B_evolution_in_window,
+            # component slices
+            'Ex': E_evolution_in_window[0], 'Ey': E_evolution_in_window[1], 'Ez': E_evolution_in_window[2],
+            'Bx': B_evolution_in_window[0], 'By': B_evolution_in_window[1], 'Bz': B_evolution_in_window[2],
             'x_coordinate': window_x_coordinate,
             'y_coordinate': window_y_coordinate,
         }
@@ -831,6 +857,9 @@ class Spectral_Maxwell_Solver_2D():
         E = result["E"][:, :, :, 0, :]     # (3, Nx, Ny, N_t)
         B = result["B"][:, :, :, 0, :]
         return {
+            # stacked
+            "E": E, "B": B,
+            # component slices
             "Ex": E[0], "Ey": E[1], "Ez": E[2],
             "Bx": B[0], "By": B[1], "Bz": B[2],
             "t_coordinate": result["t_coordinate"],
@@ -856,9 +885,14 @@ class Spectral_Maxwell_Solver_2D():
             t_chunk_size=t_chunk_size,
             point_chunk_size=point_chunk_size,
         )
+        E = result["E"]   # (3, N_point, N_t)
+        B = result["B"]
         return {
-            "E":            result["E"],             # (3, N_point, N_t)
-            "B":            result["B"],             # (3, N_point, N_t)
+            # stacked
+            "E": E, "B": B,
+            # component slices
+            "Ex": E[0], "Ey": E[1], "Ez": E[2],
+            "Bx": B[0], "By": B[1], "Bz": B[2],
             "t_coordinate": result["t_coordinate"],  # (N_t,)
             "x_coordinate": result["x_coordinate"],  # (N_point,)
             "y_coordinate": result["y_coordinate"],  # (N_point,)
