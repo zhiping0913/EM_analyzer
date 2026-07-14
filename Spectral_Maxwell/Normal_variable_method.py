@@ -112,14 +112,14 @@ def initialize_EMk0(EMk0, k_hat, k_mask):
     return jax.device_put(EMk0_proj, sharding_EM), jax.device_put(signed_k_cross_partner, sharding_EM)
 
 
-@partial(jit, static_argnames=('point_chunk_size',))
+@partial(jit, static_argnames=('t_chunk_size',))
 def _evolution_at_points_all_t(
     rts,
     t_arr,
     EMk0, signed_k_cross_partner, omega,
     kx, ky, kz,
     normalization,
-    point_chunk_size,
+    t_chunk_size,
 ):
     """Reconstruct E, B*c at every point in `rts` for every t in `t_arr`.
 
@@ -133,13 +133,13 @@ def _evolution_at_points_all_t(
 
         EMk(k, t) = EMk0(k)·cos(ω·t) + signed_k_cross_partner(k)·sin(ω·t)
 
-    Loop nesting: outer `lax.map` over t, inner `lax.map` over points. That
-    way ω·t / cos(ω·t) / sin(ω·t) — all (Nkx·Nky·Nkz) tensors that only
-    depend on t — are computed once per t and shared across every point in
-    the inner map. (The dual redundancy is point_phase across t; symmetric
-    trade-off, but per-point cos/sin was the concrete waste the user asked
-    about.) No window-shift phase — the whole point of a fixed-r0 sweep is
-    to see the pulse naturally drift past the point.
+    Strategy: precompute `point_phase_all = exp(i·k·r)` for every point in
+    one vmapped shot, then `lax.map` over t (chunked by `t_chunk_size` for
+    vectorized throughput). Per t we build (Nkx·Nky·Nkz) cos/sin once and
+    fuse them with `point_phase_all` and `EMk0` in a single einsum. This
+    kills both nested-map redundancies (cos/sin no longer per-point,
+    point_phase no longer per-t) at the cost of persisting one big
+    tensor:  point_phase_all,  shape (N_point, Nkx, Nky, Nkz).
 
     Args:
         rts:        (N_point, 3), lab-frame coordinates, m. Column order (x,y,z).
@@ -151,41 +151,44 @@ def _evolution_at_points_all_t(
         omega:      (Nkx, Nky, Nkz), rad/s.
         kx, ky, kz: replicated 1-D k-axes.
         normalization: scalar (Δkx·Δky·Δkz / (2π)^3), 1/m^3.
-        point_chunk_size: passed as `batch_size` to the inner (point) map;
-                    None runs it sequentially.
+        t_chunk_size: passed as `batch_size` to the outer t map. Larger =
+                    more vectorization but more transient memory for the
+                    per-chunk (chunk_t, Nkx, Nky, Nkz) cos/sin buffers.
+                    None runs t sequentially.
 
     Returns:
         EMk_at_points_all_t: (2, 3, N_point, N_t), real (E, B*c).
     """
-    point_map_kwargs = (
-        {} if point_chunk_size is None else {'batch_size': int(point_chunk_size)}
-    )
+    # 1. Precompute point_phase for every point, once. Persistent tensor.
+    def _one_point_phase(rt):
+        k_dot_r = (
+            kx[:, None, None] * rt[0]
+            + ky[None, :, None] * rt[1]
+            + kz[None, None, :] * rt[2]
+        )   # (Nkx, Nky, Nkz)
+        return jnp.exp(1j * k_dot_r)   # (Nkx, Nky, Nkz), complex
+    point_phase_all = jax.vmap(_one_point_phase)(rts)   # (N_point, Nkx, Nky, Nkz), complex
 
-    def _at_time(t):
+    # 2. Per t: fused einsum against point_phase_all. cos/sin computed once
+    #    per t (and, when t_chunk_size vmaps a chunk, once per chunk element).
+    def _at_one_t(t):
         omega_t = omega * t                                              # (Nkx, Nky, Nkz)
         coswt = jnp.cos(omega_t)                                         # (Nkx, Nky, Nkz)
         sinwt = jnp.sin(omega_t)                                         # (Nkx, Nky, Nkz)
+        term_cos = jnp.einsum(
+            'cmxyz,pxyz,xyz->cmp', EMk0, point_phase_all, coswt,
+        )                                                                # (2, 3, N_point), complex
+        term_sin = jnp.einsum(
+            'cmxyz,pxyz,xyz->cmp', signed_k_cross_partner, point_phase_all, sinwt,
+        )                                                                # (2, 3, N_point), complex
+        return normalization * (term_cos + term_sin)                     # (2, 3, N_point), complex
 
-        def _at_point(rt):
-            k_dot_r = (
-                kx[:, None, None] * rt[0]
-                + ky[None, :, None] * rt[1]
-                + kz[None, None, :] * rt[2]
-            )                                                            # (Nkx, Nky, Nkz)
-            point_phase = jnp.exp(1j * k_dot_r)                          # (Nkx, Nky, Nkz), complex
-            term_cos = jnp.einsum(
-                'cmxyz,xyz->cm', EMk0, point_phase * coswt,
-            )                                                            # (2, 3), complex
-            term_sin = jnp.einsum(
-                'cmxyz,xyz->cm', signed_k_cross_partner, point_phase * sinwt,
-            )                                                            # (2, 3), complex
-            return normalization * (term_cos + term_sin)                 # (2, 3), complex
-
-        return jax.lax.map(_at_point, rts, **point_map_kwargs)           # (N_point, 2, 3), complex
-
-    EMk_over_t = jax.lax.map(_at_time, t_arr)          # (N_t, N_point, 2, 3), complex
+    t_map_kwargs = (
+        {} if t_chunk_size is None else {'batch_size': int(t_chunk_size)}
+    )
+    EMk_over_t = jax.lax.map(_at_one_t, t_arr, **t_map_kwargs)          # (N_t, 2, 3, N_point), complex
     # Take real part: E and B*c are real; imag is numerical noise.
-    return jnp.real(jnp.transpose(EMk_over_t, (2, 3, 1, 0)))   # (2, 3, N_point, N_t)
+    return jnp.real(jnp.transpose(EMk_over_t, (1, 2, 3, 0)))            # (2, 3, N_point, N_t)
 
 
 class Spectral_Maxwell_Solver:
@@ -372,7 +375,7 @@ class Spectral_Maxwell_Solver:
         self,
         t_coordinate,
         x_point=None, y_point=None, z_point=None,
-        chunk_size=None,
+        t_chunk_size=None,
     ):
         """Evaluate E(t) and B(t) at fixed lab-frame points over an array of times.
 
@@ -391,17 +394,24 @@ class Spectral_Maxwell_Solver:
         the exact bandlimited-sinc-interpolated field. No window shift: r0
         is fixed in the lab frame and the pulse drifts past it naturally.
 
-        For each (point, t) the evaluation cost is O(Nkx·Nky·Nkz), and
-        `lax.map` over points/t chunks bounds intermediate memory.
+        Implementation: precompute `point_phase = exp(i·k·r0)` for every
+        point once, then `lax.map` over t with a fused einsum. Neither
+        cos(ω·t) (which only depends on t) nor point_phase (which only
+        depends on r0) is recomputed. Memory cost is a persistent tensor
+        of shape (N_point, Nkx, Nky, Nkz) — roughly N_point·Nk·16 B — so
+        this method is best when that fits comfortably; for very large
+        N_point × Nk on a full 3-D grid, split the call over point
+        batches externally.
 
         Args:
             t_coordinate: (N_t,) times, s.
             x_point, y_point, z_point: lab-frame point coordinates, m.
                 Each may be None (treated as 0), a scalar, or a 1-D array;
                 non-scalar entries must share the same length N_point.
-            chunk_size: optional int; if set, `jax.lax.map` uses this as
-                its `batch_size` — trading per-batch memory for vectorized
-                throughput. None (default) processes points sequentially.
+            t_chunk_size: optional int; if set, the t-map runs with this
+                `batch_size` — larger = more vectorized throughput but
+                more transient memory for the per-chunk cos/sin buffers.
+                None (default) processes t sequentially.
 
         Returns:
             EB_evolution_dict = {
@@ -458,7 +468,7 @@ class Spectral_Maxwell_Solver:
             self.omega,
             self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
             self._point_inverse_normalization,
-            None if chunk_size is None else int(chunk_size),
+            None if t_chunk_size is None else int(t_chunk_size),
         )   # (2, 3, N_point, N_t)
 
         E_at_points = EMk_at_points[0]                          # (3, N_point, N_t), V/m
@@ -554,7 +564,7 @@ class Spectral_Maxwell_Solver_1D():
         self,
         t_coordinate,
         x_point=None,
-        chunk_size=None,
+        t_chunk_size=None,
     ):
         """See `Spectral_Maxwell_Solver.evolution_at_points`.
 
@@ -563,7 +573,7 @@ class Spectral_Maxwell_Solver_1D():
         result = self.Solver.evolution_at_points(
             t_coordinate=t_coordinate,
             x_point=x_point, y_point=None, z_point=None,
-            chunk_size=chunk_size,
+            t_chunk_size=t_chunk_size,
         )
         return {
             "E":            result["E"],             # (3, N_point, N_t)
@@ -659,7 +669,7 @@ class Spectral_Maxwell_Solver_2D():
         self,
         t_coordinate,
         x_point=None, y_point=None,
-        chunk_size=None,
+        t_chunk_size=None,
     ):
         """See `Spectral_Maxwell_Solver.evolution_at_points`.
 
@@ -669,7 +679,7 @@ class Spectral_Maxwell_Solver_2D():
         result = self.Solver.evolution_at_points(
             t_coordinate=t_coordinate,
             x_point=x_point, y_point=y_point, z_point=None,
-            chunk_size=chunk_size,
+            t_chunk_size=t_chunk_size,
         )
         return {
             "E":            result["E"],             # (3, N_point, N_t)
