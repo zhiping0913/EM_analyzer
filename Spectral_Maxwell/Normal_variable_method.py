@@ -112,6 +112,66 @@ def initialize_EMk0(EMk0, k_hat, k_mask):
     return jax.device_put(EMk0_proj, sharding_EM), jax.device_put(signed_k_cross_partner, sharding_EM)
 
 
+@partial(jit)
+def _evolution_at_one_point_all_t(
+    x0, y0, z0,
+    t_arr,
+    EMk0, signed_k_cross_partner, omega,
+    kx, ky, kz,
+    normalization,
+):
+    """Reconstruct E, B*c at a single lab-frame point (x0, y0, z0) for every t.
+
+    Physical (Riemann-sum) inverse of the 0-centered spectrum, matching the
+    same normalization as `get_field_from_spectrum_with_coordinate`:
+
+        f(r0, t) = (Δkx·Δky·Δkz / (2π)^3) · Σ_k FE(k, t) · exp(i k·r0)
+
+    with FE(k, t) evolved via the normal-variable identity used by
+    `evolution_t`:
+
+        EMk(k, t) = EMk0(k)·cos(ω·t) + signed_k_cross_partner(k)·sin(ω·t)
+
+    No window-shift phase — the whole point of a fixed-r0 sweep is to see
+    the pulse naturally drift past the point.
+
+    Args:
+        x0, y0, z0: scalar coordinates of the evaluation point, m.
+        t_arr:      (N_t,) times, s.
+        EMk0:       (2, 3, Nkx, Nky, Nkz) transversally-projected k-space
+                    fields at t=0 (units V·m³, matching evolution_t's EMk0).
+        signed_k_cross_partner: (2, 3, Nkx, Nky, Nkz), same convention as
+                    evolution_t's arg — signs and swap already absorbed.
+        omega:      (Nkx, Nky, Nkz), rad/s.
+        kx, ky, kz: replicated 1-D k-axes.
+        normalization: scalar (Δkx·Δky·Δkz / (2π)^3), 1/m^3.
+
+    Returns:
+        EMk_at_one_point_at_all_t: (2, 3, N_t), real (E, B*c).
+    """
+    k_dot_r = (
+        kx[:, None, None] * x0
+        + ky[None, :, None] * y0
+        + kz[None, None, :] * z0
+    )   # (Nkx, Nky, Nkz)
+    point_phase = jnp.exp(1j * k_dot_r)   # (Nkx, Nky, Nkz), complex
+
+    def _at_time(t):
+        omega_t = omega * t                                              # (Nkx, Nky, Nkz)
+        coswt = jnp.cos(omega_t)                                         # (Nkx, Nky, Nkz)
+        sinwt = jnp.sin(omega_t)                                         # (Nkx, Nky, Nkz)
+        term_cos = jnp.einsum(
+            'cmxyz,xyz->cm', EMk0, point_phase * coswt,
+        )                                                                # (2, 3), complex
+        term_sin = jnp.einsum(
+            'cmxyz,xyz->cm', signed_k_cross_partner, point_phase * sinwt,
+        )                                                                # (2, 3), complex
+        return normalization * (term_cos + term_sin)                     # (2, 3), complex
+
+    EMk_over_t = jax.lax.map(_at_time, t_arr)          # (N_t, 2, 3), complex
+    # Take real part: E and B*c are real; imag is numerical noise.
+    return jnp.real(jnp.transpose(EMk_over_t, (1, 2, 0)))   # (2, 3, N_t)
+
 
 class Spectral_Maxwell_Solver:
     """
@@ -193,6 +253,37 @@ class Spectral_Maxwell_Solver:
         self._k_dot_v_over_c: Optional[jnp.ndarray] = None
         self._last_window_shift_velocity: Optional[jnp.ndarray] = None
 
+        # Δk per axis (dk=2π for degenerate 1-point axes, so the factor
+        # dk/(2π) is a no-op there — same convention as the FFT path).
+        self.dkx = self.grid_k.dkx
+        self.dky = self.grid_k.dky
+        self.dkz = self.grid_k.dkz
+        # Riemann-sum normalization for point-wise inverse:
+        # f(r0, t) = (Δkx·Δky·Δkz / (2π)^3) · Σ_k FE(k, t) · exp(i k·(r0 - Δ))
+        self._point_inverse_normalization = (
+            self.dkx * self.dky * self.dkz / (2 * jnp.pi) ** 3
+        )
+        # r-offset per axis (physical position the FFT treats as its "r=0").
+        # fftshift puts the DC bin at index N//2, and the FFT convention is
+        # that the shifted-index N//2 corresponds to r_FFT=0. The physical
+        # position at that index is `coord_pad[N//2]`, which is 0 only when
+        # the padded coord happens to be exactly centered on 0. For every
+        # other case the point-wise inverse must use r0_physical - Δ so the
+        # returned value lines up with what `evolution()` (fftn+ifftn round
+        # trip) returns on the grid.
+        #
+        # We can reconstruct Δ from the original coord + pad_slices without
+        # storing the padded coord:  Δ = x[0] + (N_pad//2 - pad_before)·dr,
+        # and for a degenerate axis (N=1) it is simply x[0].
+        def _r_offset(coord, N_pad, pad_slice, d):
+            if coord.size <= 1:
+                return jnp.asarray(coord[0], dtype=jnp.float64)
+            pad_before = pad_slice.start if pad_slice.start is not None else 0
+            return coord[0] + (N_pad // 2 - pad_before) * d
+        self._r_offset_x = _r_offset(self.x_coordinate, self.Nx_pad, self.pad_slices[0], self.grid_k.dx)
+        self._r_offset_y = _r_offset(self.y_coordinate, self.Ny_pad, self.pad_slices[1], self.grid_k.dy)
+        self._r_offset_z = _r_offset(self.z_coordinate, self.Nz_pad, self.pad_slices[2], self.grid_k.dz)
+
     @profile
     def evolution(
         self, evolution_time=0.0,window_shift_velocity=jnp.array((0.0,0.0,0.0)),
@@ -261,6 +352,105 @@ class Spectral_Maxwell_Solver:
                 "y_coordinate": window_y_coordinate,   #shape=(Ny,), unit: m
                 "z_coordinate": window_z_coordinate,   #shape=(Nz,), unit: m
             }
+
+    def evolution_at_points(
+        self,
+        t_coordinate,
+        x_point=None, y_point=None, z_point=None,
+        chunk_size=None,
+    ):
+        """Evaluate E(t) and B(t) at fixed lab-frame points over an array of times.
+
+        The k-space spectrum is evolved in the normal-variable basis and
+        inverse-Fourier-transformed pointwise via a physical Riemann sum, so
+        each point is bandlimited-interpolated to arbitrary sub-grid precision
+        without the O(N^d log N) cost of a full IFFT per t. No window shift —
+        r0 is fixed in the lab frame and the pulse drifts past it naturally.
+
+        For each (point, t) the evaluation cost is O(Nkx·Nky·Nkz), and
+        `lax.map` over points/t chunks bounds intermediate memory.
+
+        Args:
+            t_coordinate: (N_t,) times, s.
+            x_point, y_point, z_point: lab-frame point coordinates, m.
+                Each may be None (treated as 0), a scalar, or a 1-D array;
+                non-scalar entries must share the same length N_point.
+            chunk_size: optional int; if set, `jax.lax.map` uses this as
+                its `batch_size` — trading per-batch memory for vectorized
+                throughput. None (default) processes points sequentially.
+
+        Returns:
+            EB_evolution_dict = {
+                "E":            (3, N_point, N_t), V/m,
+                "B":            (3, N_point, N_t), T,
+                "t_coordinate": (N_t,),
+                "x_coordinate": (N_point,), m,
+                "y_coordinate": (N_point,), m,
+                "z_coordinate": (N_point,), m,
+            }
+        """
+        # 1. Normalize point coordinates to (N_point,) arrays.
+        def _to_1d(v):
+            if v is None:
+                return None
+            return jnp.asarray(v, dtype=jnp.float64).flatten()
+        xs = _to_1d(x_point)
+        ys = _to_1d(y_point)
+        zs = _to_1d(z_point)
+        sizes = [a.size for a in (xs, ys, zs) if a is not None and a.size > 1]
+        N_point = max(sizes) if sizes else max(
+            (a.size for a in (xs, ys, zs) if a is not None), default=1,
+        )
+        def _broadcast(arr):
+            if arr is None:
+                return jnp.zeros((N_point,), dtype=jnp.float64)
+            if arr.size == 1:
+                return jnp.broadcast_to(arr, (N_point,))
+            assert arr.size == N_point, (
+                f"point-coordinate arrays must share a length; got {arr.size}, expected {N_point}"
+            )
+            return arr
+        xs = _broadcast(xs)
+        ys = _broadcast(ys)
+        zs = _broadcast(zs)
+
+        # 2. Time axis.
+        t_arr = jnp.asarray(t_coordinate, dtype=jnp.float64).flatten()   # (N_t,)
+
+        # 3. Bind non-point args once so lax.map only carries (x0,y0,z0).
+        # Shift the physical points by the FFT r-offset so exp(i·k·r_shifted)
+        # in the Riemann sum yields the field at the physical r0.
+        xs_shifted = xs - self._r_offset_x
+        ys_shifted = ys - self._r_offset_y
+        zs_shifted = zs - self._r_offset_z
+
+        def _one_point(rt):
+            return _evolution_at_one_point_all_t(
+                rt[0], rt[1], rt[2],
+                t_arr,
+                self.EMk0, self.signed_k_cross_partner,
+                self.omega,
+                self.kx_coordinate, self.ky_coordinate, self.kz_coordinate,
+                self._point_inverse_normalization,
+            )   # (2, 3, N_t)
+
+        rts = jnp.stack([xs_shifted, ys_shifted, zs_shifted], axis=-1)   # (N_point, 3)
+        map_kwargs = {} if chunk_size is None else {'batch_size': int(chunk_size)}
+        EMk_at_points = jax.lax.map(_one_point, rts, **map_kwargs)   # (N_point, 2, 3, N_t)
+        EMk_at_points = jnp.transpose(EMk_at_points, (1, 2, 0, 3))   # (2, 3, N_point, N_t)
+
+        E_at_points = EMk_at_points[0]                          # (3, N_point, N_t), V/m
+        B_at_points = EMk_at_points[1] / C.speed_of_light       # (3, N_point, N_t), T
+
+        return {
+            "E":            E_at_points,
+            "B":            B_at_points,
+            "t_coordinate": t_arr,
+            "x_coordinate": xs,
+            "y_coordinate": ys,
+            "z_coordinate": zs,
+        }
+
 
 class Spectral_Maxwell_Solver_1D():
     """
@@ -337,6 +527,29 @@ class Spectral_Maxwell_Solver_1D():
             'Bz': B_evolution_in_window[2, :],
             'x_coordinate': window_x_coordinate,
         }
+
+    def evolution_at_points(
+        self,
+        t_coordinate,
+        x_point=None,
+        chunk_size=None,
+    ):
+        """See `Spectral_Maxwell_Solver.evolution_at_points`.
+
+        1-D thin wrapper: y and z axes are degenerate.
+        """
+        result = self.Solver.evolution_at_points(
+            t_coordinate=t_coordinate,
+            x_point=x_point, y_point=None, z_point=None,
+            chunk_size=chunk_size,
+        )
+        return {
+            "E":            result["E"],             # (3, N_point, N_t)
+            "B":            result["B"],             # (3, N_point, N_t)
+            "t_coordinate": result["t_coordinate"],  # (N_t,)
+            "x_coordinate": result["x_coordinate"],  # (N_point,)
+        }
+
 
 class Spectral_Maxwell_Solver_2D():
     """
@@ -418,4 +631,28 @@ class Spectral_Maxwell_Solver_2D():
             'Bz': B_evolution_in_window[2, :, :],
             'x_coordinate': window_x_coordinate,
             'y_coordinate': window_y_coordinate,
+        }
+
+    def evolution_at_points(
+        self,
+        t_coordinate,
+        x_point=None, y_point=None,
+        chunk_size=None,
+    ):
+        """See `Spectral_Maxwell_Solver.evolution_at_points`.
+
+        2-D thin wrapper: the z-axis is degenerate so `z_point` is fixed at
+        0 and dropped from the returned dict.
+        """
+        result = self.Solver.evolution_at_points(
+            t_coordinate=t_coordinate,
+            x_point=x_point, y_point=y_point, z_point=None,
+            chunk_size=chunk_size,
+        )
+        return {
+            "E":            result["E"],             # (3, N_point, N_t)
+            "B":            result["B"],             # (3, N_point, N_t)
+            "t_coordinate": result["t_coordinate"],  # (N_t,)
+            "x_coordinate": result["x_coordinate"],  # (N_point,)
+            "y_coordinate": result["y_coordinate"],  # (N_point,)
         }
